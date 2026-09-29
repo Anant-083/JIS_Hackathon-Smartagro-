@@ -157,10 +157,9 @@ DEBUG_MODE          = os.getenv("FLASK_DEBUG", "0") == "1"
 
 # Gemini is used as a genuinely INDEPENDENT second vision model in the crop
 # diagnosis ensemble. Only active when GEMINI_API_KEY is set in .env.
-# gemini-3.5-flash: stable GA model, good quota on free & paid tiers (Sep 2026).
+# gemini-3-flash: primary model (Sep 2026). gemini-3.5-flash kept as waterfall fallback.
 # gemini-3.1-pro-preview was removed — Pro models require a paid plan (causes 429).
-GEMINI_DIAGNOSIS_MODEL = os.getenv("GEMINI_DIAGNOSIS_MODEL", "gemini-3.5-flash")
-
+GEMINI_DIAGNOSIS_MODEL = os.getenv("GEMINI_DIAGNOSIS_MODEL", "gemini-3-flash-preview")
 # ── Per-feature usage analytics ─────────────────────────────────────────────
 # Tracks how often each SmartAgro feature is used (page views + API calls) as
 # aggregate counters — NO personal data, NO IPs, NO message content. Counters
@@ -2427,13 +2426,13 @@ vision_models = [
 ]
 
 # Gemini model waterfall — tried in order until one succeeds.
-# gemini-3.5-flash: primary — confirmed working. Timeout=20s (vision needs time).
-# gemini-3.8-flash: fallback — gets 503 FAST (< 1s) when overloaded, so adds
-#   almost no delay when failing, but can serve when 3.5-flash is saturated.
+# gemini-3-flash: primary — fastest, good quota on free & paid tiers (Sep 2026).
+# gemini-3.5-flash: fallback — gets 503 FAST (< 1s) when overloaded, so adds
+#   almost no delay when failing, but can serve when 3-flash is saturated.
 # gemini-3.5-flash-lite: EXCLUDED — caused genuine 30s hangs (not fast 503).
 GEMINI_MODEL_WATERFALL = [
-    GEMINI_DIAGNOSIS_MODEL,   # gemini-3.5-flash — primary, confirmed working
-    "gemini-3.8-flash",       # fast-failing fallback (503 in < 1s when overloaded)
+    GEMINI_DIAGNOSIS_MODEL,   # gemini-3-flash — primary
+    "gemini-3.5-flash",       # fast-failing fallback (503 in < 1s when overloaded)
 ]
 
 # ── Gemini quota-exhausted cache ─────────────────────────────────────────────
@@ -2740,7 +2739,7 @@ def diagnose_crop():
         sys_prompt += f" All free-text values must be in {lang_name}."
 
     # ── Step 2: Gemini PRIMARY → Groq SECONDARY ──────────────────────────────
-    # Gemini (gemini-3.5-flash) is the primary model — better crop pathology
+    # Gemini (gemini-3-flash) is the primary model — better crop pathology
     # accuracy and not subject to the Groq ITPM rate limits.
     # Groq (qwen/qwen3.8-27b) is the secondary — activates the INSTANT Gemini
     # fails (503 returns in < 1s, so Groq kicks in with no meaningful delay).
