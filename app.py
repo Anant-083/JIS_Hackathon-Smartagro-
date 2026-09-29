@@ -157,10 +157,10 @@ DEBUG_MODE          = os.getenv("FLASK_DEBUG", "0") == "1"
 
 # Gemini is used as a genuinely INDEPENDENT second vision model in the crop
 # diagnosis ensemble. Only active when GEMINI_API_KEY is set in .env.
-# gemini-3.1-flash-lite: primary — fast, lightweight, good free-tier quota (Sep 2026).
+# gemini-3.6-flash: primary — confirmed working, good quota (Sep 2026).
 # gemini-3.5-flash: kept as waterfall fallback if primary is overloaded/unavailable.
 # gemini-3.1-pro-preview was removed — Pro models require a paid plan (causes 429).
-GEMINI_DIAGNOSIS_MODEL = os.getenv("GEMINI_DIAGNOSIS_MODEL", "gemini-3.1-flash-lite")
+GEMINI_DIAGNOSIS_MODEL = os.getenv("GEMINI_DIAGNOSIS_MODEL", "gemini-3.6-flash")
 # ── Per-feature usage analytics ─────────────────────────────────────────────
 # Tracks how often each SmartAgro feature is used (page views + API calls) as
 # aggregate counters — NO personal data, NO IPs, NO message content. Counters
@@ -1676,7 +1676,7 @@ def _gemini_chat_reply(system_prompt, messages):
             "generationConfig": {"temperature": 0.5, "maxOutputTokens": 700},
         }
         resp = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
             headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
             json=body, timeout=30
         )
@@ -2427,11 +2427,11 @@ vision_models = [
 ]
 
 # Gemini model waterfall — tried in order until one succeeds.
-# gemini-3.1-flash-lite: primary — fast, lightweight, good free-tier quota (Sep 2026).
+# gemini-3.6-flash: primary — confirmed working, good quota (Sep 2026).
 # gemini-3.5-flash: secondary Gemini — activates instantly if primary 503s (< 1s fail).
 # gemini-3.5-flash-lite: EXCLUDED — caused genuine 30s hangs (not fast 503).
 GEMINI_MODEL_WATERFALL = [
-    GEMINI_DIAGNOSIS_MODEL,   # gemini-3.1-flash-lite — PRIMARY Gemini
+    GEMINI_DIAGNOSIS_MODEL,   # gemini-3.6-flash — PRIMARY Gemini
     "gemini-3.5-flash",       # SECONDARY Gemini (fast-failing fallback)
 ]
 
@@ -2739,7 +2739,7 @@ def diagnose_crop():
         sys_prompt += f" All free-text values must be in {lang_name}."
 
     # ── Step 2: Gemini PRIMARY → Groq SECONDARY ──────────────────────────────
-    # Gemini (gemini-3.1-flash-lite) is the primary model, with gemini-3.5-flash
+    # Gemini (gemini-3.6-flash) is the primary model, with gemini-3.5-flash
     # as the secondary Gemini fallback. Groq (qwen/qwen3.8-27b) activates only
     # if ALL Gemini models in the waterfall fail.
     results, models_used = [], []
