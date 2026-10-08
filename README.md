@@ -1,243 +1,364 @@
+# 🌱 SmartAgro
+
+**A multilingual, AI-powered advisory app for Indian farmers: crop disease diagnosis, live mandi prices, weather risk alerts, and crop health insights in one installable web app.**
+
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+![Python](https://img.shields.io/badge/Python-3.11-blue.svg)
+![Flask](https://img.shields.io/badge/Backend-Flask-black.svg)
+![Gemma](https://img.shields.io/badge/AI-Gemma-4285F4.svg)
+![PWA](https://img.shields.io/badge/App-PWA-purple.svg)
+
+**Live demo:** https://jis-hackathon-smartagro.onrender.com
+**Track:** Open Source + Gemma
+
 ---
-title: Smartagro
-emoji: 🌱
-colorFrom: green
-colorTo: blue
-sdk: docker
-app_port: 7860
-pinned: false
+
+## Table of Contents
+
+1. [The Problem](#the-problem)
+2. [The Solution](#the-solution)
+3. [Features in Detail](#features-in-detail)
+4. [Why SmartAgro Is Good](#why-smartagro-is-good)
+5. [Multi-Model AI Pipeline](#multi-model-ai-pipeline)
+6. [Tech Stack and External Services](#tech-stack-and-external-services)
+7. [Architecture and Folder Structure](#architecture-and-folder-structure)
+8. [Setup and Run Locally](#setup-and-run-locally)
+9. [Environment Variables](#environment-variables)
+10. [Run with Docker](#run-with-docker)
+11. [Deploy on Render](#deploy-on-render)
+12. [API Endpoints](#api-endpoints)
+13. [How It Works](#how-it-works)
+14. [Reliability and Fallbacks](#reliability-and-fallbacks)
+15. [Security](#security)
+16. [Known Limitations](#known-limitations)
+17. [Contributing](#contributing)
+18. [License](#license)
+19. [Acknowledgements](#acknowledgements)
+
 ---
 
-# SmartAgro
+## The Problem
 
-An open source farming assistant for Indian farmers, built with Flask and Google Gemma.
+Indian farmers make high-stakes decisions every day, but the information they need is hard to reach:
 
-[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
-[![Flask](https://img.shields.io/badge/Flask-3.0-black.svg)](https://flask.palletsprojects.com/)
-[![Gemma](https://img.shields.io/badge/AI-Gemma-4285F4.svg)](https://ai.google.dev/gemma)
+- **Language barrier.** Most agricultural advice online is in English, while farmers speak many regional languages.
+- **Late disease detection.** Spotting a crop disease early often needs an expert who is not nearby, so damage is done before help arrives.
+- **Scattered mandi prices.** Prices sit on government portals that are slow, hard to navigate, and sometimes down, and they are quoted per quintal, which is confusing for small sellers who think in kg.
+- **Weather risk.** Pests, fungal disease, heat, and rain affect crops, but raw forecasts do not tell a farmer what to do.
+- **Limited literacy and connectivity.** Typing long questions or using heavy apps is difficult on low-end phones and weak networks.
 
-**Live demo:** [SmartAgro on Hugging Face Spaces](https://alphacoder7206-smartagro.hf.space/)
+## The Solution
 
-## The problem
+SmartAgro puts these tools in one lightweight, installable web app that speaks the farmer's language.
 
-Farmers can have difficulty finding farming information in their preferred language, getting quick help when a crop looks diseased, comparing mandi prices, and preparing for weather risks. Limited literacy, mobile data, and unreliable connectivity make long or scattered information harder to use.
-
-## The solution
-
-| Problem | Feature | How it helps |
+| Problem | SmartAgro Feature | How It Helps |
 |---|---|---|
-| Farming information is often hard to access in a preferred language | Multilingual interface and Kisan Helper | Translates page content and lets farmers ask farming questions in supported languages. |
-| Crop disease identification takes time | Crop diagnosis | Accepts a crop image, checks whether it appears to show plant material, then asks the shared Gemma and Gemini fallback helper for an analysis. |
-| Mandi rates are scattered | Mandi prices | Displays government Agmarknet observations by supported city, with saved price history as a fallback. |
-| Weather can damage crops | Weather and alerts | Shows current conditions, forecast data, and rule or AI generated crop risk guidance. |
-| Literacy and connectivity can be limited | Voice controls and PWA caching | Supports speech input and spoken replies; previously visited pages and static files can be available offline. |
+| Information only in English | Multilingual UI, chatbot, and voice | The app and the assistant answer in the farmer's chosen language |
+| Late disease detection | AI crop diagnosis from a photo | Upload a leaf photo and get the likely disease and advice in seconds |
+| Wrong or irrelevant photos | Image pre-check | Non-crop images are rejected before any AI call, saving time and quota |
+| Hard-to-find mandi prices | Mandi Prices page | Live prices in one place, with a quintal/kg toggle |
+| Government API downtime | Cached price fallback | The app shows the last saved prices with an update date instead of failing |
+| Weather risk is unclear | Alerts and 15-day risk outlook | Forecast data is turned into clear risk levels and seasonal advisories |
+| Unclear crop health | NDVI gauge | Shows a crop health score, honestly labelled as Satellite or Estimated |
+| Low literacy | Voice input and text-to-speech | Speak a question and hear the answer |
+| Poor connectivity and weak phones | Installable PWA | Installs like an app and keeps working with cached content |
 
-## Features
+---
 
-### AI chatbot
+## Features in Detail
 
-All model-backed features call one shared generation helper. It tries the configured Gemma model first (`gemma-4-26b-a4b-it` by default, configurable with `GEMMA_MODEL`) and then tries `gemini-3.6-flash` if Gemma errors or returns no text. Both use `GEMINI_API_KEY`; if both calls fail, the feature returns its own fallback or error. The fallback request uses the Gemini GenerateContent API with supported generation fields and omits Gemma's `thinking_config`. Chat history is trimmed so its final turn is always a user turn. Off-topic questions are refused before any model call using localized canned replies.
+### AI Chatbot (SmartAgro Assistant)
+- Answers questions about agriculture, crop disease, irrigation, mandi prices, MSP, Kisan schemes, and how to use the app.
+- Replies in the user's chosen language, with localized refusals for off-topic questions so the assistant stays focused on farming.
+- Pulls live data (weather, mandi prices) into its answers when a question needs it.
+- Powered by **Gemma**, with an automatic Gemini fallback (see [Multi-Model AI Pipeline](#multi-model-ai-pipeline)).
 
-### Crop disease diagnosis
+### Crop Disease Diagnosis
+- Upload a plant or leaf photo and receive the likely disease, severity, and treatment advice.
+- A **pre-check rejects non-crop images** (screenshots, infographics, unrelated photos) without spending an AI call.
+- Shows **which model answered** (Gemma, or the fallback) so results are transparent.
+- If the primary model fails, the request is retried on a fallback model automatically.
 
-Upload an image for an AI generated crop health assessment. The backend validates the base64 payload and size, then asks the shared AI helper to classify whether it shows plant material before generating two diagnosis passes. The response identifies the model used for each pass. If the classifier call itself fails at both model providers, the current code allows diagnosis to continue and the later vision pass may still fail. No live model provider response has been verified in this checkout.
+### Mandi Prices
+- Live commodity prices sourced from the government's Agmarknet data (data.gov.in).
+- **Quintal / kg toggle:** prices are published per quintal, and the toggle converts them (kg = quintal / 100) across cards, table, and charts. The selected unit is remembered between visits and every price is labelled with its unit.
+- **Offline-style resilience:** if the government portal is down or slow, the app serves the last saved prices from a bundled cache and shows when they were last updated.
 
-### Mandi prices
+### Weather and 15-Day Risk Outlook
+- Current conditions and forecast from weather APIs.
+- The Alerts page turns forecast data into a day-by-day risk outlook.
+- The page never spins forever: it times out, shows a clear message, and offers a **Retry** button. If a weather provider fails, the last good response is reused.
 
-Prices are fetched from data.gov.in Agmarknet data. The interface can show rupees per quintal or per kilogram; kilogram values are quintal values divided by 100 and shown to two decimal places. The saved preference applies to price cards, ticker, table, and charts. Live min/max/modal values are displayed when returned by Agmarknet; history fallback contains saved modal prices and may not have min/max values. If the live feed is empty or unavailable, persisted market history is used where present; no price is invented when neither source has one.
+### Alerts and Seasonal Advisories
+- Season-aware advisories for the user's city.
+- Humidity-based pest and fungal warnings.
+- Optional notifications for important alerts.
 
-### Weather and 15-day risk outlook
+### NDVI Crop Health Gauge
+- An animated gauge showing crop health.
+- **Honest labelling:** the gauge says **Satellite** when the value comes from real satellite data (when `rasterio` and data are available), and **Estimated** when it is a deterministic estimate from real inputs such as recent rain, temperature, season, and location.
+- No random values: the same location and date always give the same result, cached per location per day.
 
-OpenWeatherMap provides current weather and its forecast. Visual Crossing can extend the forecast when configured. Only returned provider days are presented as forecast data; days without data are marked unavailable. The Alerts outlook has a timeout and a Retry control.
+### Voice and Accessibility
+- Voice input for questions (speech-to-text).
+- Text-to-speech for answers, with careful number pronunciation across Indian languages.
+- Keyboard handlers, ARIA labels, and landmark tags for assistive technology.
 
-### Alerts and notifications
+### Settings
+- **Language** switching across 10+ Indian languages.
+- **Light and dark theme**, with hero sections that follow the active theme.
+- **Temperature unit:** Celsius or Fahrenheit, applied wherever temperature is shown.
+- **Price unit:** quintal or kg.
 
-The Alerts page shows weather and crop risk information, a forecast outlook, and seasonal advice. Browser notification permission and daily reminder time can be set in Settings. Notification delivery depends on browser support and permission; the app does not provide a server push subscription service.
+### Installable PWA
+- Install button, web manifest, and service worker for an app-like experience on phones.
 
-### Crop health gauge
+---
 
-The gauge is explicitly labeled **Satellite**, **Estimated**, or **Unavailable**. When `rasterio` is installed and a usable Sentinel-2 scene can be read, it calculates NDVI from red and near-infrared imagery served through Earth Search STAC. If imagery cannot be retrieved, it returns a deterministic estimate from the rounded location, date, current temperature, and rainfall, cached per location and UTC day. The estimate is a heuristic, not measured NDVI, and is labeled **Estimated**.
+## Why SmartAgro Is Good
 
-### Voice, language, settings, and install
+- **Built for real farmers.** Local languages, voice, simple screens, and a kg toggle for prices.
+- **Honest about data.** NDVI is labelled Satellite or Estimated, cached prices show their date, and AI answers show which model produced them. Nothing is invented or random.
+- **Resilient.** Every outside service (AI, weather, government prices, satellite data) has a timeout and a fallback, so one failure does not take the app down.
+- **Open source.** MIT licensed, with a public repository, clear setup steps, and no secrets in the code.
+- **Light and fast.** Flask backend with a vanilla HTML/CSS/JS frontend, with no heavy framework to download on slow networks.
+- **Secure by default.** Content Security Policy and security headers, and keys kept in environment variables only.
 
-Kisan Helper supports browser speech synthesis and browser speech recognition; recorded audio can also be sent to Groq Whisper for transcription. Language selection translates page content and sets the chatbot response language. Settings include light/dark/system themes, Celsius/Fahrenheit, quintal/kg, notification controls, text-to-speech and voice-input toggles, and voice volume. Preferences persist in local storage. The manifest and service worker provide install metadata and cache visited pages and static assets for offline use in compatible browsers. Browser permission, speech-language availability, and install prompts vary by browser.
+---
 
-## Why it is useful
+## Multi-Model AI Pipeline
 
-- **Accessible:** language, voice, font size, and unit settings are available in the interface.
-- **Offline resilience:** the service worker caches pages and assets, while market history is persisted on the server.
-- **Honest labels:** estimated NDVI and missing forecast or market data are identified instead of shown as observations.
-- **Security basics:** responses include a Content Security Policy and common browser security headers; `.env` is ignored by Git.
-- **Open source:** released under the MIT License.
+SmartAgro is built around **Gemma** as the primary model for AI features, reached through the Gemini API with `google-genai`.
 
-## Technology and external services
+1. **Primary:** every AI feature (chat, diagnosis, recommendations, alerts, translations) calls the Gemma model set in `GEMMA_MODEL` first.
+2. **Fallback:** if Gemma times out, errors, hits quota, or returns unusable output, the request is retried once on **`gemini-3.6-flash`** using the same API key.
+3. **Second opinion (diagnosis):** when both models answer, their results are compared. If they agree, the result is marked high confidence. If they disagree, the main answer is shown together with the second model's view and a recommendation to verify with an agricultural expert.
+4. **Failure handling:** if both models fail, the user gets a friendly localized message, never a crash.
+5. **Transparency:** the diagnosis result shows which model answered.
 
-| Service or library | Used for | Environment variable |
+Voice transcription is the only feature that does not use these models: it uses Groq Whisper.
+
+---
+
+## Tech Stack and External Services
+
+| Area | Technology |
+|---|---|
+| Backend | Python, Flask |
+| Frontend | Vanilla HTML, CSS, JavaScript (PWA) |
+| Primary AI | Gemma via the Gemini API (`google-genai`) |
+| Fallback AI | Gemini (`gemini-3.6-flash`) |
+| Voice to text | Groq Whisper |
+| Weather | Visual Crossing, OpenWeather |
+| Mandi prices | data.gov.in (Agmarknet) |
+| Crop health | `rasterio` satellite data, with a deterministic estimate when unavailable |
+| Deployment | Docker, Render |
+| License | MIT |
+
+| Service | Used For | Environment Variable |
 |---|---|---|
-| Google Gemini API | Gemma first, then `gemini-3.6-flash` fallback for chat, image diagnosis, crop recommendations, selected alerts, and translations | `GEMINI_API_KEY`; optional Gemma model override `GEMMA_MODEL` |
-| Groq Whisper | Chatbot speech-to-text | `GROQ_API_KEY` |
-| OpenWeatherMap | Current weather and short forecast | `OPENWEATHER_API_KEY` |
-| Visual Crossing | Extended daily forecast | `VISUALCROSSING_API_KEY` |
-| data.gov.in Agmarknet | Mandi price observations | `DATA_GOV_API_KEY` |
-| Element84 Earth Search STAC and Sentinel-2 COGs | Satellite imagery for NDVI | No key; `rasterio` and `numpy` must be installed |
-| Open-Meteo geocoding | City lookup for chatbot live-data requests | No key |
-| Flask, Gunicorn, requests, python-dotenv | Web server, HTTP calls, and configuration | — |
+| Gemini API (Gemma and Gemini models) | Chat, diagnosis, recommendations, alerts, translations | `GEMINI_API_KEY`, `GEMMA_MODEL` |
+| Groq | Voice transcription | `GROQ_API_KEY` |
+| Visual Crossing | Forecasts | `VISUALCROSSING_API_KEY` |
+| OpenWeather | Current weather | `OPENWEATHER_API_KEY` |
+| data.gov.in | Mandi prices | `DATA_GOV_API_KEY` |
 
-## Architecture and files
+---
 
-```text
-.
-├── app.py                         Flask routes, provider calls, caches, and server logic
-├── chat_city_aliases.json          City names used by chatbot live-data lookup
-├── market_history_cache.json       Persisted market price history
-├── requirements.txt                Python dependencies
-├── runtime.txt                     Python runtime declaration
-├── Dockerfile                      Container build and Gunicorn command
-├── LICENSE                         MIT license text
-├── .env.example                    Environment variable template
-├── README.md                       Project documentation
-├── templates/
-│   ├── index.html                  Home dashboard
-│   ├── diagnose.html               Crop diagnosis page
-│   ├── market.html                 Mandi prices page
-│   ├── alerts.html                 Weather and crop alerts page
-│   ├── usage.html                  Usage counters page
-│   └── offline.html                Offline navigation fallback
-└── static/
-    ├── css/                        Page and shared stylesheets
-    ├── js/
-    │   ├── main.js                 Shared navigation, install, and notification logic
-    │   ├── dashboard.js            Weather, crop, map, and vegetation UI
-    │   ├── diagnose.js             Image upload and diagnosis UI
-    │   ├── market.js               Prices, unit display, filters, and charts
-    │   ├── market_translate.js     Market translation helpers
-    │   ├── alerts.js               Alerts, forecast outlook, and translations
-    │   ├── kisan-helper.js         Chat, voice, and text-to-speech UI
-    │   ├── settings.js              Persistent user settings
-    │   ├── profile.js               Profile controls
-    │   └── translations.js         Browser interface translations
-    ├── icons/                      PWA icons
-    ├── manifest.json               PWA metadata
-    └── service-worker.js           Offline page and asset caching
+## Architecture and Folder Structure
+
+```
+SmartAgro-MAIN-2/
+├── app.py                      # Flask app: routes, AI pipeline, weather, market, NDVI
+├── templates/                  # HTML pages (home, diagnose, market, alerts)
+├── static/
+│   ├── css/                    # Styles, themes
+│   ├── js/                     # Page scripts (alerts.js, market.js, ...)
+│   ├── manifest.json           # PWA manifest
+│   └── sw.js                   # Service worker
+├── market_history_cache.json   # Seed data for the mandi price fallback
+├── chat_city_aliases.json      # City name aliases for the chatbot
+├── requirements.txt            # Python dependencies
+├── Dockerfile                  # Container build
+├── runtime.txt                 # Python version for hosting
+├── .env.example                # Template for environment variables
+├── .gitignore                  # Keeps .env and runtime files out of git
+├── LICENSE                     # MIT license
+└── README.md
 ```
 
-## Setup
+Runtime files such as usage counters and NDVI caches are created while the app runs and are not committed.
 
-### Prerequisites
+---
 
-Python 3.11 is the supported runtime. Docker builds install GDAL libraries for `rasterio`. For local non-Docker installation, rasterio may need compatible GDAL system libraries; without rasterio, the gauge falls back to an estimate.
+## Setup and Run Locally
 
-### Install and run
+**Prerequisites:** Python 3.11 (recommended), `pip`, and API keys for the services listed above.
 
 ```bash
-git clone https://github.com/Anant-083/Smartagro-Main.git
-cd Smartagro-Main
-python -m venv .venv
-source .venv/bin/activate
+# 1. Clone
+git clone https://github.com/Anant-083/JIS_Hackathon-Smartagro-.git
+cd JIS_Hackathon-Smartagro-
+
+# 2. Create a virtual environment
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+# 3. Install dependencies
 pip install -r requirements.txt
-cp .env.example .env
-```
 
-Edit `.env` with your own provider keys. Never commit it. Then run:
+# 4. Configure environment variables
+cp .env.example .env            # then edit .env and add your keys
 
-```bash
+# 5. Run
 python app.py
 ```
 
-`python app.py` listens on `PORT` (default `7860`). For production-like local serving:
+Open the printed local address in your browser.
 
-```bash
-PORT=7860 gunicorn --bind 0.0.0.0:7860 --workers 1 --threads 8 --timeout 60 app:app
-```
+> **Python 3.14 note:** `rasterio` has no ready-made build for Python 3.14. If it fails to install, remove it from your local install. The app still starts and shows an **Estimated** NDVI. Python 3.11 is recommended.
 
-### Environment variables
+---
 
-| Variable | Purpose | Required |
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your own values. **Never commit `.env`.**
+
+| Variable | Required | Purpose |
 |---|---|---|
-| `GEMINI_API_KEY` | Gemini API access for Gemma features | For AI features |
-| `GEMMA_MODEL` | Gemma model identifier; defaults in `app.py` | No |
-| `OPENWEATHER_API_KEY` | Current weather and forecast | For live weather |
-| `VISUALCROSSING_API_KEY` | Extended forecast days | No; outlook may be shorter |
-| `GROQ_API_KEY` | Whisper voice transcription | No; voice transcription unavailable without it |
-| `DATA_GOV_API_KEY` | Agmarknet feed access | For current mandi data |
-| `PORT` | HTTP listen port; defaults to `7860` | No |
-| `FLASK_DEBUG` | Enables gated debug endpoints when set to `1` | No; keep `0` in deployment |
-| `LOG_LEVEL` | Python logging level | No |
-| `DIAGNOSIS_LOG_DIR` | Local diagnosis audit log directory | No |
+| `GEMINI_API_KEY` | Yes | Key for the Gemini API, used for Gemma and the Gemini fallback |
+| `GEMMA_MODEL` | Optional | Gemma model name (a default is used if empty) |
+| `GROQ_API_KEY` | Optional | Voice transcription |
+| `VISUALCROSSING_API_KEY` | Recommended | Forecasts and the 15-day outlook |
+| `OPENWEATHER_API_KEY` | Recommended | Current weather |
+| `DATA_GOV_API_KEY` | Recommended | Live mandi prices |
+| `FLASK_DEBUG` | Optional | `1` for local development, `0` in production |
 
-### Docker
+Without optional keys, the related feature falls back or shows a clear message, and the rest of the app keeps working.
+
+---
+
+## Run with Docker
 
 ```bash
 docker build -t smartagro .
-docker run --rm -p 7860:7860 --env-file .env smartagro
+docker run -p 7860:7860 --env-file .env smartagro
 ```
+
+Then open `http://localhost:7860`.
+
+---
 
 ## Deploy on Render
 
-1. Push this repository to a Git provider and create a new **Web Service** in Render from that repository.
-2. Select Docker as the runtime so the included `Dockerfile` installs GDAL and binds to Render's `PORT` value (with `7860` as the local and Hugging Face default).
-3. In the service dashboard, open **Environment** and add the variables from the table above. Set `FLASK_DEBUG` to `0`; never put credentials in source code or README files.
-4. Deploy and wait for the service to become healthy. Check `/healthz` for process health and `/readyz` for configured provider indicators.
-5. Add or rotate provider credentials in Render’s dashboard when needed, then redeploy.
+1. Push the repository to GitHub (make sure `.env` is **not** included).
+2. On [render.com](https://render.com), choose **New → Web Service** and connect the repository.
+3. Choose the **Docker** runtime (the repository includes a `Dockerfile`).
+4. Open the **Environment** tab and add each variable from the table above, using your own keys. Set `FLASK_DEBUG=0`.
+5. Deploy. When the status shows **Live**, open the URL and test chat, diagnosis, Mandi Prices, and Alerts.
 
-Render free instances may sleep when idle. Persistent files such as market history and NDVI cache require a persistent disk if they must survive instance replacement; without one, the app can still run but regenerates those caches.
+> On Render's free tier the service sleeps when idle, so the first request after a pause can take a minute.
 
-## API endpoints
+---
+
+## API Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/` | Home dashboard |
-| GET | `/diagnose` | Diagnosis page |
-| GET | `/market` | Mandi page |
-| GET | `/alerts` | Alerts page |
-| GET | `/offline` | Offline fallback page |
-| GET | `/usage` | Usage dashboard |
-| GET | `/healthz`, `/readyz` | Health and configuration status |
-| GET | `/api/weather` | Current weather and merged forecast |
-| GET | `/api/vegetation` | Satellite or estimated vegetation index |
-| GET | `/api/market` | Agmarknet market data and saved fallback |
-| POST | `/api/chat` | Kisan Helper chat |
-| POST | `/api/stt` | Groq Whisper speech transcription |
-| POST | `/api/diagnose` | Crop image diagnosis |
-| GET | `/api/diagnose-log`, `/api/diagnose-log/image/<path:filename>`, `/api/diagnose-log/accuracy` | Diagnosis review data, debug mode only |
-| POST | `/api/diagnose-log/review` | Save human review, debug mode only |
-| POST | `/api/crop-recommendations` | Crop suggestions |
-| POST | `/api/alerts` | Current weather alerts |
-| POST | `/api/alerts-forecast` | Forecast-day alerts |
-| POST | `/api/monthly-alerts` | Risk outlook for available forecast days |
-| POST | `/api/seasonal-alerts` | Seasonal advice |
-| POST | `/api/crop-risk` | Crop risk analysis |
-| POST | `/api/translate-market`, `/api/translate-alerts`, `/api/translate-dashboard`, `/api/translate-diagnose`, `/api/translate-diagnosis-result` | Translate page content |
-| POST | `/api/translate-market/clear` | Clear market translation cache |
-| GET | `/api/debug-market`, `/api/debug-extended-forecast` | Provider diagnostics, only when `FLASK_DEBUG=1` |
-| GET | `/api/usage` | Read usage counters |
-| POST | `/api/usage/reset` | Reset usage counters |
+| GET | `/` | Home page |
+| POST | `/api/chat` | Chatbot (Gemma first, Gemini fallback) |
+| POST | `/api/diagnose` | Crop disease diagnosis from an image |
+| POST | `/api/seasonal-alerts` | Seasonal advisories for a city |
+| GET | `/healthz` | Health check |
 
-Debug and diagnosis review routes are gated by `FLASK_DEBUG=1`; leave debug mode off in deployment.
+Other routes cover weather, the 15-day outlook, mandi prices, NDVI, and voice transcription. See `app.py` for the complete list.
 
-## How it works
+---
 
-**Chat:** the browser sends the conversation, language, temperature preference, and available weather context. The server detects supported live-data intents, fetches relevant data, and supplies that context to the shared Gemma then Gemini fallback helper. Off-topic requests are refused before the model call.
+## How It Works
 
-**Diagnosis:** the browser posts a validated image payload. The server checks size and base64 decoding, asks the shared helper whether it is plant material, then generates and combines diagnosis analysis. Provider and validation errors are returned to the page.
+**Chat flow**
+1. The user sends a question in their language.
+2. The server checks that the topic is about farming, otherwise it replies with a localized refusal.
+3. If the question needs live data (weather, mandi prices), the server fetches it and passes it to the model.
+4. Gemma generates the answer. If it fails, the Gemini fallback answers.
+5. The reply is shown (and can be read aloud).
 
-**Market fallback:** the server requests Agmarknet observations by state and saves price history. If the live feed has no usable data, the most recent saved genuine observations are used where available; otherwise the city is shown without fabricated prices.
+**Diagnosis flow**
+1. The user uploads a photo.
+2. A pre-check rejects non-crop images without any model call.
+3. The image goes to Gemma, with the fallback if it fails.
+4. The response is validated, then shown with the model name and a confidence note.
 
-## Known limitations
+**Market flow**
+1. The server requests prices from data.gov.in with a short timeout and one retry.
+2. On success, prices are shown and the cache is refreshed.
+3. On failure or empty data, the saved cache is shown with its update date.
+4. The quintal/kg toggle converts the displayed prices in the browser and remembers the choice.
 
-- Render free-tier services can cold start after idle periods.
-- Government Agmarknet data and its API can be delayed or unavailable; cached history can also be absent on ephemeral storage.
-- NDVI is estimated when `rasterio`, imagery, or a readable scene is unavailable. Estimated values are not satellite measurements.
-- The included runtime and Docker base pin Python 3.11.9. This checkout was run with Python 3.14.2; a Docker build and Python 3.11.9 runtime were not run here.
-- Weather and extended forecast coverage depends on valid provider credentials and provider availability. The outlook only reports returned forecast days.
-- Browser speech recognition and installation prompts vary by browser. Whisper transcription needs `GROQ_API_KEY`.
-- This environment did not have rasterio installed, and live provider responses were not verified as part of repository checks.
+---
+
+## Reliability and Fallbacks
+
+| Failure | What the User Sees |
+|---|---|
+| Gemma fails | The answer comes from the Gemini fallback, and the model label shows it |
+| Both AI models fail | A friendly localized message |
+| Government price API down | Last saved prices with an update date |
+| Weather provider fails | The last successful response, or a clear message with a Retry button |
+| Satellite data missing | NDVI marked **Estimated** |
+| No network | The installed PWA still opens cached pages |
+
+---
+
+## Security
+
+- API keys live only in environment variables, never in the code or the repository.
+- `.env` is listed in `.gitignore`, and `.env.example` contains only placeholders.
+- Content Security Policy and other security headers are set on responses.
+- Voice and image inputs are validated before use.
+- Rotate any key that has ever been shared or shown in a screenshot.
+
+---
+
+## Known Limitations
+
+- Government data (Agmarknet) can be slow or down, so cached prices may be older than live prices.
+- Without satellite data or `rasterio`, NDVI is an estimate, and it is labelled that way.
+- `rasterio` does not install on Python 3.14, so use Python 3.11.
+- Render's free tier has cold starts, and its disk resets on restart, so runtime caches are rebuilt.
+- AI diagnosis is general guidance and not a replacement for an agricultural expert. Always verify serious cases locally.
+- Gemma and Gemini quotas depend on your Google project, and heavy use can hit limits.
+
+---
 
 ## Contributing
 
-Issues and pull requests are welcome. Keep secrets in environment variables, preserve honest labels for unavailable or estimated data, and describe any checks performed with a change.
+Contributions are welcome.
 
-## License and acknowledgements
+1. Fork the repository.
+2. Create a branch: `git checkout -b feature/your-feature`.
+3. Make your changes and test them locally.
+4. Never commit `.env` or any secret.
+5. Open a pull request describing what you changed and why.
 
-This project is licensed under the [MIT License](./LICENSE). Thanks to the open source maintainers behind Flask, Rasterio, NumPy, Leaflet, and Chart.js, and to the providers of Gemma, weather, market, and satellite data services.
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+---
+
+## Acknowledgements
+
+- Google's **Gemma** and **Gemini** models, through the Gemini API
+- **Groq** for Whisper speech-to-text
+- **Visual Crossing** and **OpenWeather** for weather data
+- **data.gov.in / Agmarknet** for mandi price data
+- The open-source Python and Flask community
+- Everyone who tested the app and gave feedback, including collaborators on earlier versions
+
+---
+
+*Made for Indian farmers. If it helps even one farmer decide better, it did its job.* 🌾
