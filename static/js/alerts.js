@@ -17,6 +17,18 @@ let upcomingRisksChecked = false;
 let weeklyDangerDays = [];
 let weeklyDangerPopupShown = false;
 
+document.addEventListener('temperatureUnitChanged', () => {
+    if (!currentWeather) return;
+    renderAlertsList(allAlerts);
+    renderPesticideSafety(currentWeather);
+    renderHarmfulSafeCrops(currentWeather);
+    const root = document.getElementById('alertsSection');
+    if (root) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) walker.currentNode.nodeValue = localizeTemperatureText(walker.currentNode.nodeValue);
+    }
+});
+
 /* ══════════════════════════════════════════════
    ALERTS TRANSLATION SYSTEM
 ══════════════════════════════════════════════ */
@@ -237,6 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /* ── Load weather then fetch alerts ─────────── */
 async function loadAlertsData(lat, lon) {
+    monthlyLoaded = false;
     // Show alerts section with loader
     const alertsSection = document.getElementById('alertsSection');
     if (alertsSection) alertsSection.style.display = '';
@@ -297,6 +310,7 @@ async function loadAlertsData(lat, lon) {
 
     } catch (err) {
         console.error('Alerts load error:', err);
+        showMonthlyAlertsError('Could not load weather data for the risk outlook. Check your connection and retry.');
         showToast('Could not load alert data.', 'error');
         document.getElementById('alertsList').innerHTML = `
       <div style="text-align:center;padding:60px 0;color:var(--text-3)">
@@ -581,7 +595,7 @@ function renderCropRisk(crops) {
         <div class="crk-reasons">
           ${c.risky_days.slice(0, 3).map(rd => `
             <div class="crk-reason-day">
-              <strong>${getDayName(rd.date, false)}</strong>: ${rd.reasons.join('; ')}
+              <strong>${getDayName(rd.date, false)}</strong>: ${rd.reasons.map(localizeTemperatureText).join('; ')}
             </div>`).join('')}
         </div>`
       : `<div class="crk-safe-note"><i class="fas fa-check-circle"></i> ${_at('Safe to grow all 6 upcoming days') || 'Safe to grow all 6 upcoming days'}</div>`}
@@ -633,14 +647,14 @@ function renderAlertsList(alerts) {
       <div class="alert-card-icon">${alert.icon}</div>
       <div class="alert-card-body">
         <div class="alert-card-top">
-          <span class="alert-card-title">${_at(alert.title) || alert.title}</span>
+          <span class="alert-card-title">${localizeTemperatureText(_at(alert.title) || alert.title)}</span>
           <span class="alert-category ${getCatClass(alert.category)}">${_at(alert.category) || alert.category}</span>
           <span class="alert-category ${getTypeClass(alert.type)}">${_at(capitalize(alert.type)) || capitalize(alert.type)}</span>
         </div>
-        <div class="alert-card-msg">${_at(alert.message) || alert.message}</div>
+        <div class="alert-card-msg">${localizeTemperatureText(_at(alert.message) || alert.message)}</div>
         <div class="alert-card-action">
           <i class="fas fa-circle-right"></i>
-          <span><strong>${_at('Action') || 'Action'}:</strong> ${_at(alert.action) || alert.action}</span>
+          <span><strong>${_at('Action') || 'Action'}:</strong> ${localizeTemperatureText(_at(alert.action) || alert.action)}</span>
         </div>
       </div>
     </div>
@@ -655,6 +669,13 @@ function getCatClass(cat) {
         'Crop Advisory': 'cat-crop',
     };
     return map[cat] || 'cat-crop';
+}
+
+function localizeTemperatureText(text) {
+    return String(text || '').replace(/(-?\d+(?:\.\d+)?)°([CF])/g, (_, raw, unit) => {
+        const celsius = unit === 'F' ? (Number(raw) - 32) * 5 / 9 : Number(raw);
+        return formatTemperature(celsius);
+    });
 }
 
 function getTypeClass(type) {
@@ -894,8 +915,8 @@ async function renderHarmfulSafeCrops(weather) {
 
             if (!tempOk || !humidityOk) {
                 const reasons = [];
-                if (temp < crop.minTemp) reasons.push(`Too cold (min ${crop.minTemp}°C needed)`);
-                if (temp > crop.maxTemp) reasons.push(`Too hot (max ${crop.maxTemp}°C tolerated)`);
+                if (temp < crop.minTemp) reasons.push(`Too cold (min ${formatTemperature(crop.minTemp)} needed)`);
+                if (temp > crop.maxTemp) reasons.push(`Too hot (max ${formatTemperature(crop.maxTemp)} tolerated)`);
                 if (humidity < crop.minHumidity) reasons.push(`Humidity too low (min ${crop.minHumidity}% needed)`);
                 harmful.push({ ...crop, reasons });
             } else {
@@ -912,7 +933,7 @@ async function renderHarmfulSafeCrops(weather) {
             <span style="margin-left:auto;font-size:0.7rem;padding:2px 8px;background:rgba(248,113,113,0.1);color:var(--red);border-radius:50px;border:1px solid rgba(248,113,113,0.2)">⚠ ${_at('Risky') || 'Risky'}</span>
           </div>
           <div class="hsc-reason">
-            ${c.reasons.map(r => `<div><i class="fas fa-xmark" style="color:var(--red);margin-right:4px"></i>${_at(r) || r}</div>`).join('')}
+            ${c.reasons.map(r => `<div><i class="fas fa-xmark" style="color:var(--red);margin-right:4px"></i>${localizeTemperatureText(_at(r) || r)}</div>`).join('')}
           </div>
         </div>`)
       .join('')
@@ -928,7 +949,7 @@ async function renderHarmfulSafeCrops(weather) {
           <div class="hsc-reason" style="margin-top:6px">
             <div style="display:flex;align-items:center;gap:6px">
               <i class="fas fa-check-circle" style="color:var(--green)"></i>
-              <span style="font-size:0.78rem;color:var(--text-2)">${_at('Suitable for') || 'Suitable for'} ${temp}°C, ${humidity}% ${_at('humidity') || 'humidity'}</span>
+              <span style="font-size:0.78rem;color:var(--text-2)">${_at('Suitable for') || 'Suitable for'} ${formatTemperature(temp)}, ${humidity}% ${_at('humidity') || 'humidity'}</span>
             </div>
             <div style="margin-top:6px;height:4px;background:var(--bg-2);border-radius:2px;overflow:hidden">
               <div style="height:100%;width:${c.suitability}%;background:linear-gradient(90deg,var(--green-dark),var(--green));border-radius:2px;transition:width 1s ease"></div>
@@ -1213,10 +1234,36 @@ function switchPeriodTab(period) {
 }
 
 let monthlyLoaded = false;
+function showMonthlyAlertsError(message = 'Could not load the risk outlook. Check your connection and retry.') {
+    const cal = document.getElementById('monthlyCalendar');
+    if (!cal) return;
+    cal.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:24px;color:var(--text-3)">
+        <p>${message}</p>
+        <button type="button" class="btn btn-primary" onclick="retryMonthlyAlerts()">Retry</button>
+    </div>`;
+}
+
+function retryMonthlyAlerts() {
+    monthlyLoaded = false;
+    if (!currentForecast || currentForecast.length === 0) {
+        const location = getUserLocation();
+        if (location) {
+            loadAlertsData(location.lat, location.lon);
+            return;
+        }
+    }
+    loadMonthlyAlerts();
+}
+
 async function loadMonthlyAlerts() {
     if (monthlyLoaded) return;
-    if (!currentForecast || currentForecast.length === 0) return;
+    if (!currentForecast || currentForecast.length === 0) {
+        showMonthlyAlertsError('No real forecast data is available for this location yet. Retry to check again.');
+        return;
+    }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
     try {
         // The weekly view above is capped to 7 days on purpose, but the
         // Monthly calendar is a rolling window covering the full real
@@ -1238,7 +1285,8 @@ async function loadMonthlyAlerts() {
                         city: currentWeather ? currentWeather.city : '',
                         lat: currentWeather ? currentWeather.lat : null,
                         lon: currentWeather ? currentWeather.lon : null
-                    })
+                    }),
+                    signal: controller.signal
                 });
                 const extData = await extRes.json();
                 if (extData.daily && extData.daily.length) {
@@ -1254,11 +1302,13 @@ async function loadMonthlyAlerts() {
         const res = await fetch('/api/monthly-alerts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
+            body: JSON.stringify({
                 forecast: currentForecast,
                 daily_alerts: monthlyDailyAlerts
-            })
+            }),
+            signal: controller.signal
         });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const monthly = data.monthly || [];
 
@@ -1306,6 +1356,11 @@ async function loadMonthlyAlerts() {
         monthlyLoaded = true;
     } catch (err) {
         console.error("Monthly alerts error:", err);
+        showMonthlyAlertsError(err.name === 'AbortError'
+            ? 'The risk outlook request timed out after 10 seconds. Please retry.'
+            : 'Could not load the risk outlook. Check your connection and retry.');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 

@@ -3,6 +3,7 @@
   background: linear-gradient(160deg, #050d06, #0a1a0c, #06100a);
   min-height: 280px;
 }
+body.light-theme .diagnose-hero { background: linear-gradient(160deg, #f0f7f0, #e8f5e9, #f0fdfa); }
 .diagnose-hero .orb-1 { background: radial-gradient(circle, var(--teal), transparent); }
 .diagnose-hero .orb-2 { background: radial-gradient(circle, var(--green-2), transparent); }
 

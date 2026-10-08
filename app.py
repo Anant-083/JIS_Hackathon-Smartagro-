@@ -12,8 +12,8 @@ from google.genai import types
 # IPv6 first and your network's IPv6 path is broken or very slow, while the
 # browser silently falls back to IPv4 in milliseconds. This forces Python's
 # HTTP stack to only use IPv4, matching what the browser effectively does.
+import socket
 try:
-    import socket
     import urllib3.util.connection as urllib3_conn
 
     def _allowed_gai_family():
@@ -21,7 +21,7 @@ try:
 
     urllib3_conn.allowed_gai_family = _allowed_gai_family
 except Exception as _e:
-    logger.info(f"[AgroSmart] Could not force IPv4 (non-fatal): {_e}")
+    logging.getLogger("smartagro").info(f"[AgroSmart] Could not force IPv4 (non-fatal): {_e}")
 import os
 import json
 import re
@@ -43,6 +43,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("smartagro")
+
+class _SecretRedactionFilter(logging.Filter):
+    """Prevent credentials from appearing in terminal or service logs."""
+    _token_patterns = (
+        (re.compile(r"AIza[0-9A-Za-z_-]{15,}"), "[REDACTED API KEY]"),
+        (re.compile(r"gsk_[0-9A-Za-z]{12,}"), "[REDACTED API KEY]"),
+    )
+
+    def filter(self, record):
+        message = record.getMessage()
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENWEATHER_API_KEY",
+                     "VISUALCROSSING_API_KEY", "DATA_GOV_API_KEY"):
+            secret = os.getenv(name, "")
+            if secret:
+                message = message.replace(secret, "[REDACTED API KEY]")
+        for pattern, replacement in self._token_patterns:
+            message = pattern.sub(replacement, message)
+        record.msg, record.args = message, ()
+        return True
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_SecretRedactionFilter())
 
 # ── Optional heavy deps for Sentinel-2 NDVI ─────────────────────────────────
 try:
@@ -147,6 +169,18 @@ except ImportError:
 def _add_static_cache_headers(response):
     if request.path.startswith("/static/"):
         response.headers["Cache-Control"] = "public, max-age=604800, immutable"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(self), microphone=(self), camera=(self)")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+        "img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com https://cdnjs.cloudflare.com; "
+        "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+        "connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self';"
+    )
     return response
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
@@ -155,7 +189,6 @@ GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
 GEMMA_MODEL          = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
 GROQ_API_KEY         = os.getenv("GROQ_API_KEY", "")  # retained only for Whisper speech transcription
 _gemma_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-NINJA_API_KEY       = os.getenv("NINJA_API_KEY", "")  # no longer used by /api/market (kept for backward-compat only)
 DEBUG_MODE          = os.getenv("FLASK_DEBUG", "0") == "1"
 
 def _gemma_generate(contents, system_instruction=None, temperature=0.5,
@@ -313,14 +346,13 @@ LANG_NAMES = {
 
 logger.info(f"[AgroSmart] Gemini API key: {'configured' if GEMINI_API_KEY else 'missing'} | Gemma model: {GEMMA_MODEL}")
 logger.info(f"[AgroSmart] Weather key: {'OK' if OPENWEATHER_API_KEY else 'MISSING'}")
-logger.info(f"[AgroSmart] Ninja key: {'configured' if NINJA_API_KEY else 'missing'}")
 logger.info(f"[AgroSmart] Sentinel-2 NDVI: {'ENABLED (rasterio available)' if _RASTERIO_AVAILABLE else 'DISABLED (install rasterio)'}")
 
 
 # ─── Sentinel-2 Real NDVI (via Earth Search STAC + COG pixel read) ───────────
-# Cache: keyed by rounded lat/lon grid (0.01° ≈ 1 km), TTL = 6 hours
+# Cache is keyed by rounded location and UTC date so every page load that day
+# sees the same satellite reading or weather-based estimate.
 _NDVI_CACHE_PATH = os.path.join(basedir, "ndvi_cache.json")
-_NDVI_CACHE_TTL = 6 * 3600  # seconds
 
 def _load_ndvi_cache():
     try:
@@ -360,13 +392,6 @@ def get_sentinel2_ndvi(lat: float, lon: float) -> dict | None:
         return None  # rasterio not installed
 
     # ── Cache lookup ─────────────────────────────────────────────────────────
-    cache_key = f"{round(lat, 2)},{round(lon, 2)}"
-    now = time.monotonic()
-    cached = _ndvi_cache.get(cache_key)
-    if cached and (now - cached["ts"]) < _NDVI_CACHE_TTL:
-        logger.info(f"[NDVI] Cache hit for {cache_key}")
-        return cached["data"]
-
     STAC_URL = "https://earth-search.aws.element84.com/v1/search"
 
     def _query_stac(max_cloud: int) -> list:
@@ -447,8 +472,6 @@ def get_sentinel2_ndvi(lat: float, lon: float) -> dict | None:
         "source":    "Copernicus Sentinel-2 L2A",
         "cloud_pct": cloud_pct,
     }
-    _bounded_cache_set(_ndvi_cache, cache_key, {"ts": now, "data": result}, max_entries=500)
-    _save_ndvi_cache(_ndvi_cache)
     logger.info(f"[NDVI] Result: NDVI={ndvi}, status='{status}'")
     return result
 
@@ -536,6 +559,8 @@ def readyz():
 
 
 # ─── Weather API ─────────────────────────────────────────────────────────────
+_weather_response_cache = {}
+
 # ─── Visual Crossing — real extended forecast (out to ~15 days) ─────────────
 # OpenWeather's free tier only gives ~5-6 real forecast days. Visual Crossing
 # extends that with real data for roughly the rest of the Alerts 30-day
@@ -681,6 +706,11 @@ def get_weather():
     if not lat or not lon:
         return jsonify({"error": "Location required"}), 400
 
+    try:
+        weather_cache_key = (round(float(lat), 2), round(float(lon), 2))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid location"}), 400
+
 
     current_url  = (f"https://api.openweathermap.org/data/2.5/weather"
                     f"?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric")
@@ -697,15 +727,12 @@ def get_weather():
             extended_days = extended_future.result()
 
         if current_resp.status_code == 429 or forecast_resp.status_code == 429:
-            return jsonify({
-                "error": "OpenWeather API Rate Limit Reached!",
-                "limit_reached": True,
-                "api_name": "OpenWeather API",
-                "details": "OpenWeather API returned an HTTP 429 Rate Limit error. Free tier daily or minute quota reached."
-            }), 429
+            raise RuntimeError("OpenWeather API rate limit reached")
 
         if current_resp.status_code != 200:
-            return jsonify({"error": f"Weather API error: {current_resp.text}"}), 500
+            raise RuntimeError(f"Weather API error: {current_resp.text}")
+        if forecast_resp.status_code != 200:
+            raise RuntimeError(f"Forecast API error: {forecast_resp.text}")
 
         current_data  = current_resp.json()
         forecast_data = forecast_resp.json()
@@ -753,7 +780,7 @@ def get_weather():
               f"merged_total={len(forecast_list)}")
 
 
-        return jsonify({
+        weather_result = {
             "current": {
                 "city":        current_data.get("name", "Your Location"),
                 "lat":         float(lat),
@@ -769,10 +796,16 @@ def get_weather():
                 "rain":        current_data.get("rain", {}).get("1h", 0),
             },
             "forecast": forecast_list,
-        })
+        }
+        _bounded_cache_set(_weather_response_cache, weather_cache_key, weather_result, max_entries=300)
+        return jsonify(weather_result)
     except Exception as e:
         logger.warning(f"[Weather error] {e}")
-        return jsonify({"error": str(e)}), 500
+        cached_weather = _weather_response_cache.get(weather_cache_key)
+        if cached_weather:
+            logger.info("[Weather] Returning last cached result after fetch failure")
+            return jsonify(cached_weather)
+        return jsonify({"error": "Weather data is temporarily unavailable. Please retry."}), 503
 
 
 # ─── Vegetation / NDVI ────────────────────────────────────────────────────
@@ -785,6 +818,25 @@ def get_weather():
 _NDVI_REQUEST_BUDGET_SEC = 8  # hard cap: give up and report "unavailable" past this
 
 
+def _estimate_ndvi(lat: float, temp_c: float, rain_mm: float, date: datetime) -> float:
+    """Stable rough estimate from observed weather, season, and latitude.
+
+    This is explicitly not a satellite measurement. Constants define a
+    transparent heuristic and are not trained or claimed as measured NDVI.
+    """
+    month = date.month
+    season_adjustment = (
+        0.05 if month in (6, 7, 8, 9) else
+        0.03 if month in (10, 11) else
+        -0.02 if month in (3, 4, 5) else 0.0
+    )
+    latitude = abs(lat)
+    location_adjustment = 0.03 if latitude < 23.5 else (0.01 if latitude < 35 else -0.02)
+    rain_adjustment = min(max(rain_mm, 0.0), 20.0) * 0.005
+    temperature_adjustment = 0.04 if 15 <= temp_c <= 30 else -min(abs(temp_c - 22.5) * 0.003, 0.08)
+    return round(max(0.0, min(0.8, 0.15 + season_adjustment + location_adjustment + rain_adjustment + temperature_adjustment)), 3)
+
+
 @app.route("/api/vegetation")
 def get_vegetation():
     lat = request.args.get("lat")
@@ -792,36 +844,54 @@ def get_vegetation():
     if not lat or not lon:
         return jsonify({"error": "Location required"}), 400
 
-    def _fallback():
-        return {
-            "ndvi": None, "status": "Data Unavailable", "obs_date": None,
-            "source": "Satellite", "cloud_pct": None,
-        }
-
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(get_sentinel2_ndvi, float(lat), float(lon))
-            try:
-                ndvi_result = future.result(timeout=_NDVI_REQUEST_BUDGET_SEC)
-            except concurrent.futures.TimeoutError:
-                # Real satellite pipelines can occasionally stall on a slow
-                # upstream host — report honestly rather than hang the tab.
-                logger.info(f"[NDVI] Timed out after {_NDVI_REQUEST_BUDGET_SEC}s for ({lat},{lon})")
-                return jsonify(_fallback())
+        lat_f, lon_f = float(lat), float(lon)
+        temp_c = float(request.args["temp"])
+        rain_mm = float(request.args.get("rain", 0))
+        today = datetime.utcnow().date().isoformat()
+        cache_key = f"{round(lat_f, 2)},{round(lon_f, 2)}:{today}"
+        cached = _ndvi_cache.get(cache_key)
+        if cached and cached.get("data"):
+            logger.info(f"[NDVI] Daily cache hit for {cache_key}")
+            return jsonify(cached["data"])
 
-        if not ndvi_result:
-            return jsonify(_fallback())
+        ex = ThreadPoolExecutor(max_workers=1)
+        future = ex.submit(get_sentinel2_ndvi, lat_f, lon_f)
+        try:
+            ndvi_result = future.result(timeout=_NDVI_REQUEST_BUDGET_SEC)
+        except concurrent.futures.TimeoutError:
+            logger.info(f"[NDVI] Timed out after {_NDVI_REQUEST_BUDGET_SEC}s for ({lat},{lon})")
+            future.cancel()
+            ndvi_result = None
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
 
-        return jsonify({
-            "ndvi":      ndvi_result["ndvi"],
-            "status":    ndvi_result["status"],
-            "obs_date":  ndvi_result["obs_date"],
-            "source":    ndvi_result["source"],
-            "cloud_pct": ndvi_result.get("cloud_pct", None),
-        })
+        if ndvi_result:
+            result = {
+                "ndvi": ndvi_result["ndvi"],
+                "status": ndvi_result["status"],
+                "obs_date": ndvi_result["obs_date"],
+                "source": "Satellite",
+                "satellite_source": ndvi_result["source"],
+                "cloud_pct": ndvi_result.get("cloud_pct"),
+            }
+        else:
+            estimate = _estimate_ndvi(lat_f, temp_c, rain_mm, datetime.utcnow())
+            result = {
+                "ndvi": estimate,
+                "status": _ndvi_status(estimate),
+                "obs_date": None,
+                "estimate_date": today,
+                "source": "Estimated",
+                "cloud_pct": None,
+            }
+        _bounded_cache_set(_ndvi_cache, cache_key, {"data": result}, max_entries=1000)
+        _save_ndvi_cache(_ndvi_cache)
+        return jsonify(result)
     except Exception as e:
         logger.warning(f"[Vegetation error] {e}")
-        return jsonify(_fallback())
+        return jsonify({"ndvi": None, "status": "Data Unavailable", "obs_date": None,
+                        "source": "Unavailable", "cloud_pct": None})
 
 
 # ─── Crop Recommendations ────────────────────────────────────────────────────
@@ -1671,6 +1741,18 @@ _CHAT_FALLBACK_MSG = {
     "ml": "ക്ഷമിക്കണം, ഇപ്പോൾ ബന്ധിപ്പിക്കുന്നതിൽ പ്രശ്നമുണ്ട്. ദയവായി കുറച്ച് സമയത്തിന് ശേഷം വീണ്ടും ശ്രമിക്കുക.",
     "pa": "ਮੁਆਫ਼ ਕਰਨਾ, ਹੁਣ ਕਨੈਕਟ ਕਰਨ ਵਿੱਚ ਸਮੱਸਿਆ ਆ ਰਹੀ ਹੈ। ਕਿਰਪਾ ਕਰਕੇ ਥੋੜ੍ਹੀ ਦੇਰ ਬਾਅਦ ਦੁਬਾਰਾ ਕੋਸ਼ਿਸ਼ ਕਰੋ।",
     "ur": "معذرت، ابھی رابطہ کرنے میں مسئلہ ہو رہا ہے۔ براہ کرم تھوڑی دیر بعد دوبارہ کوشش کریں۔",
+    "or": "ଦୁଃଖିତ, ବର୍ତ୍ତମାନ ସଂଯୋଗରେ ସମସ୍ୟା ହେଉଛି। ଦୟାକରି ପରେ ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।",
+    "as": "ক্ষমা কৰিব, এতিয়া সংযোগত সমস্যা হৈছে। অনুগ্ৰহ কৰি অলপ পিছত আকৌ চেষ্টা কৰক।",
+    "mai": "क्षमाप्रार्थी छी, एखन जुड़य में समस्या भ रहल अछि। कनी काल बाद फेर प्रयास करू।",
+    "sat": "ᱵᱟᱝ ᱢᱟᱹᱱᱟᱹ, ᱱᱤᱛ ᱡᱚᱲᱟᱣ ᱨᱮ ᱢᱤᱫ ᱢᱮᱥᱟ ᱢᱮᱱᱟᱜᱼᱟ। ᱛᱟᱭᱚᱢ ᱨᱮ ᱫᱚᱦᱲᱟ ᱠᱩᱞᱤᱭᱟᱹᱢ।",
+    "ks": "معاف کٔرِو، وۄنۍ رابطہ کرنہٕ منز دِقّت چھِ۔ مہربٲنی کٔرتھ وۄنۍ پَتہٕ دوبارٕ کوشش کٔرِو۔",
+    "ne": "माफ गर्नुहोस्, अहिले जडानमा समस्या छ। कृपया केही बेरपछि फेरि प्रयास गर्नुहोस्।",
+    "sd": "معاف ڪجو، هن وقت ڳنڍڻ ۾ مسئلو آهي. مهرباني ڪري ٿوري دير کان پوءِ ٻيهر ڪوشش ڪريو.",
+    "kok": "माफ करात, आतां जोडपाक अडचण येता. उपरांत परत यत्न करात.",
+    "mni": "ꯀꯥꯏꯗꯣꯛꯄꯤꯌꯨ, ꯍꯧꯖꯤꯛ ꯀꯅꯦꯛꯇ ꯇꯧꯕꯗ ꯄ꯭ꯔꯣꯕ꯭ꯂꯦꯝ ꯂꯩꯔꯤ। ꯃꯇꯝ ꯑꯃꯗ ꯑꯃꯨꯛ ꯍꯟꯅ ꯆꯠꯄꯤꯌꯨ।",
+    "bodo": "माफ खालाम, दानि समाव फोनांजाबाव जेंना जादों। अननानै खनसे उनाव फिन नाजानो।",
+    "doi": "माफ करना, हून कनेक्शन च समस्या आवा दी ऐ। कृपा करियै थोड़ी देर बाद फेर कोशिश करो।",
+    "sa": "क्षम्यताम्, अधुना सम्पर्के समस्या अस्ति। कृपया किञ्चित्कालानन्तरं पुनः प्रयत्नं कुर्वन्तु।",
 }
 
 
@@ -1772,6 +1854,18 @@ _OFF_TOPIC_REPLIES = {
     "ml": "ഞാൻ കിസാൻ ഹെൽപ്പർ ആണ് — എനിക്ക് കൃഷി, വിളകൾ, കാലാവസ്ഥ, മാർക്കറ്റ് വിലകൾ, സർക്കാർ പദ്ധതികൾ എന്നിവയിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. നിങ്ങളുടെ കൃഷിയെക്കുറിച്ച് ചോദിക്കൂ!",
     "pa": "ਮੈਂ ਕਿਸਾਨ ਹੈਲਪਰ ਹਾਂ — ਮੈਂ ਸਿਰਫ਼ ਖੇਤੀ, ਫਸਲਾਂ, ਮੌਸਮ, ਮੰਡੀ ਭਾਅ ਅਤੇ ਸਰਕਾਰੀ ਸਕੀਮਾਂ ਵਿੱਚ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ। ਆਪਣੇ ਖੇਤ ਬਾਰੇ ਕੁਝ ਪੁੱਛੋ!",
     "ur": "میں کسان ہیلپر ہوں — میں صرف کاشتکاری، فصلوں، موسم، منڈی کے نرخوں اور سرکاری اسکیموں میں مدد کر سکتا ہوں۔ اپنے کھیت کے بارے میں کچھ پوچھیں!",
+    "or": "ମୁଁ କିସାନ ହେଲ୍ପର। ମୁଁ କେବଳ ଚାଷ, ଫସଲ, ପାଣିପାଗ, ବଜାର ଦର ଏବଂ ସରକାରୀ ଯୋଜନା ବିଷୟରେ ସାହାଯ୍ୟ କରିପାରିବି।",
+    "as": "মই কিষাণ হেল্পাৰ। মই কেৱল খেতি, শস্য, বতৰ, বজাৰৰ দাম আৰু চৰকাৰী আঁচনিৰ বিষয়ত সহায় কৰিব পাৰোঁ।",
+    "mai": "हम किसान हेल्पर छी। हम केवल खेती, फसल, मौसम, मंडी भाव आ सरकारी योजनाक विषय में मदद क सकैत छी।",
+    "sat": "ᱤᱧ ᱠᱤᱥᱟᱹᱱ ᱦᱮᱞᱯᱟᱨ ᱠᱟᱱᱟᱹᱧ। ᱤᱧ ᱠᱮᱵᱚᱞ ᱪᱟᱥ, ᱯᱟᱹᱱᱛᱤ, ᱢᱟᱹᱦᱤᱛ ᱟᱨ ᱵᱟᱡᱟᱨ ᱫᱟᱢ ᱨᱮ ᱜᱚᱲᱚ ᱞᱮᱜᱼᱟᱹᱧ।",
+    "ks": "بہٕ کسان ہیلپر چھُس۔ بہٕ صرف کھیتی، فصل، موسم، بازار قیمت تہٕ سرکاری سکیمہٕ متعلق مدد کرِتھ ہیکہٕ۔",
+    "ne": "म किसान हेल्पर हुँ। म खेती, बाली, मौसम, बजार मूल्य र सरकारी योजनाबारे मात्र सहयोग गर्न सक्छु।",
+    "sd": "مان ڪسان هيلپر آهيان. مان صرف زراعت، فصلن، موسم، مارڪيٽ جي اگهن ۽ سرڪاري منصوبن ۾ مدد ڪري سگهان ٿو.",
+    "kok": "हांव किसान हेल्पर. हांव फकत शेती, पिकां, हवामान, बाजारभाव आनी सरकारी येवजणां विशीं मदत करूं शकता.",
+    "mni": "ꯑꯩ ꯀꯤꯁꯥꯟ ꯍꯦꯜꯄꯔꯅꯤ। ꯑꯩ ꯂꯩꯉꯥꯛ, ꯆꯥꯛ, ꯅꯨꯃꯤꯠ, ꯃꯥꯔꯀꯦꯠ ꯃꯃꯜ ꯑꯃꯁꯨꯡ ꯁꯔꯀꯥꯔꯒꯤ ꯌꯣꯖꯅꯥꯗ ꯈꯛꯇ ꯃꯇꯦꯡ ꯄꯥꯡꯕ ꯌꯥꯔꯤ।",
+    "bodo": "आं किसान हेल्पार। आं फार्म, फसल, मौसम, बाजार दाम आरो सरकारि स्कीमनि सोमोन्दै मदद होनो हायो।",
+    "doi": "मैं किसान हेल्पर आं। मैं खेती, फसल, मौसम, मंडी भाव ते सरकारी योजनाएं दे बारे च मदद करी सकना।",
+    "sa": "अहं किसानसहायकः अस्मि। अहं कृषिः, सस्यं, मौसमः, विपणिमूल्यं, शासकीययोजनाः च विषये एव सहायं करोमि।",
 }
 
 

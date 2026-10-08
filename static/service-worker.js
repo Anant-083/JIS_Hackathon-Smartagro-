@@ -3,7 +3,7 @@
    Handles: offline cache, background sync
 ═══════════════════════════════════════ */
 
-const CACHE_NAME = 'smartagro-v1';
+const CACHE_NAME = 'smartagro-v2';
 const OFFLINE_URL = '/offline';
 
 // Files to cache for offline use
@@ -19,6 +19,9 @@ const STATIC_ASSETS = [
     '/static/css/market.css',
     '/static/css/alerts.css',
     '/static/js/main.js',
+    '/static/js/settings.js',
+    '/static/js/profile.js',
+    '/static/js/kisan-helper.js',
     '/static/js/dashboard.js',
     '/static/js/diagnose.js',
     '/static/js/market.js',
@@ -26,15 +29,15 @@ const STATIC_ASSETS = [
     '/static/js/translations.js',
     '/static/icons/icon-192.png',
     '/static/icons/icon-512.png',
-    'https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Inter:wght@300;400;500;600&display=swap',
-    'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css',
 ];
 
 // Install — cache all static assets
 self.addEventListener('install', event => {
     event.waitUntil(
-        caches.open(CACHE_NAME).then(cache => {
-            return cache.addAll(STATIC_ASSETS);
+        caches.open(CACHE_NAME).then(async cache => {
+            await Promise.all(STATIC_ASSETS.map(async asset => {
+                try { await cache.add(asset); } catch (error) { /* Cache available assets; one outage must not cancel install. */ }
+            }));
         })
     );
     self.skipWaiting();
@@ -95,7 +98,7 @@ self.addEventListener('fetch', event => {
                 caches.open(CACHE_NAME).then(cache => cache.put(request, clone));
                 return res;
             })
-            .catch(() => caches.match(request))
+            .catch(() => caches.match(request, { ignoreSearch: true }))
     );
 });
 
@@ -164,4 +167,4 @@ self.addEventListener('message', event => {
         };
         event.waitUntil(self.registration.showNotification(title || '🌾 SmartAgro Weather Alert', options));
     }
-});
+});

@@ -28,4 +28,4 @@ EXPOSE 7860
 # Since this app is I/O-bound (waiting on OpenWeather/Groq/Agmarknet, not
 # doing heavy CPU work), a single worker with more threads shares memory
 # and gets you real concurrency without duplicating caches.
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "1", "--threads", "8", "--timeout", "60", "app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-7860} --workers 1 --threads 8 --timeout 60 app:app"]

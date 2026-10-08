@@ -20,12 +20,6 @@
             "purpose": "any maskable"
         }
     ],
-    "screenshots": [{
-        "src": "/static/icons/screenshot1.png",
-        "sizes": "390x844",
-        "type": "image/png",
-        "form_factor": "narrow"
-    }],
     "categories": ["agriculture", "productivity", "weather"],
     "shortcuts": [{
             "name": "Diagnose Crop",

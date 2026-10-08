@@ -702,7 +702,7 @@ window.SmartAgroNotifications = {
             alertsToTrigger.push({
                 id: 'heat_' + Math.floor(now / TWELVE_HOURS),
                 title: `🔥 Extreme Heatwave Alert - ${city}`,
-                body: `High temperature of ${Math.round(temp)}°C recorded. Irrigate standing crops during early morning or evening.`
+                body: `High temperature of ${formatTemperature(temp)} recorded. Irrigate standing crops during early morning or evening.`
             });
         }
 
@@ -711,7 +711,7 @@ window.SmartAgroNotifications = {
             alertsToTrigger.push({
                 id: 'frost_' + Math.floor(now / TWELVE_HOURS),
                 title: `❄️ Frost & Cold Wave Warning - ${city}`,
-                body: `Low temperature of ${Math.round(temp)}°C detected. Cover young crop saplings to prevent frost damage.`
+                body: `Low temperature of ${formatTemperature(temp)} detected. Cover young crop saplings to prevent frost damage.`
             });
         }
 
@@ -798,3 +798,9 @@ if (document.readyState === 'loading') {
 } else {
     initAppGlobalFeatures();
 }
+window.formatTemperature = function (celsius, withUnit = true) {
+    const fahrenheit = window.sagrTempUnit === 'fahrenheit';
+    const value = fahrenheit ? (Number(celsius) * 9 / 5 + 32) : Number(celsius);
+    const unit = fahrenheit ? '°F' : '°C';
+    return `${Math.round(value)}${withUnit ? unit : ''}`;
+};

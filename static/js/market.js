@@ -30,6 +30,18 @@ function tDemand(demand) {
     return _translations[demand] || demand;
 }
 
+function marketPrice(value) {
+    const amount = Number(value) || 0;
+    return window.sagrWeightUnit === 'kg' ? amount / 100 : amount;
+}
+function marketUnit() { return window.sagrWeightUnit === 'kg' ? 'kg' : 'quintal'; }
+function formatMarketPrice(value) {
+    const amount = marketPrice(value);
+    return amount.toLocaleString('en-IN', window.sagrWeightUnit === 'kg'
+        ? { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+        : { maximumFractionDigits: 0 });
+}
+
 /* ══════════════════════════════════════════════
    LANGUAGE DISPLAY NAMES (for overlay label)
 ══════════════════════════════════════════════ */
@@ -379,8 +391,8 @@ function renderMarketGrid(markets) {
                     <div class="crop-row">
                         <div class="cr-name" data-crop-key="${crop.crop_key || crop.crop}" title="${tCrop(crop.crop)}">${tCrop(crop.crop)}</div>
                         <div class="cr-price-wrap">
-                            <div class="cr-price">₹${crop.price.toLocaleString('en-IN')}</div>
-                            <div class="cr-unit" data-translate-market="quintal">${_t('quintal') || crop.unit}</div>
+                            <div class="cr-price">₹${formatMarketPrice(crop.price)}</div>
+                            <div class="cr-unit">/${marketUnit()}</div>
                         </div>
                         <div class="cr-change ${isUp ? 'up' : 'down'}">
                             <i class="fas fa-arrow-${isUp ? 'up' : 'down'}"></i>
@@ -613,7 +625,7 @@ function buildTicker(markets) {
                     `<span style="margin:0 20px;display:inline-flex;align-items:center;gap:6px">
                         <strong style="color:#e8f5e9">${tCrop(crop.crop)}</strong>
                         <span style="color:var(--text-3)">(${city})</span>
-                        <strong style="color:var(--amber)"> ₹${crop.price.toLocaleString('en-IN')}</strong>
+                        <strong style="color:var(--amber)"> ₹${formatMarketPrice(crop.price)}/${marketUnit()}</strong>
                         <span style="color:${color};font-size:0.7rem"> ${sign}${Math.abs(crop.change).toFixed(1)}%</span>
                         <span class="cr-demand demand-${getDemandClass(crop.demand)}" style="font-size:0.65rem;padding:1px 6px;border-radius:50px">${tDemand(crop.demand)}</span>
                     </span>`
@@ -718,7 +730,7 @@ function buildLineChart(canvas, cityData, city) {
         const color     = palette[idx % palette.length];
         return {
             label:                     tCrop(crop.crop),
-            data:                      history30,
+            data:                      history30.map(marketPrice),
             borderColor:               color,
             backgroundColor:           color + '15',
             borderWidth:               idx === 0 ? 3 : 2,
@@ -735,7 +747,7 @@ function buildLineChart(canvas, cityData, city) {
         data: { labels, datasets },
         options: {
             ...getBaseChartOptions(
-                `${city} — ${_t('30-Day Price Trend')} (${targetCrops.length} ${_t('crops') || 'crops'}, ₹/${_t('quintal') || 'quintal'})`
+                `${city} — ${_t('30-Day Price Trend')} (${targetCrops.length} ${_t('crops') || 'crops'}, ₹/${marketUnit()})`
             ),
             scales: {
                 x: {
@@ -747,7 +759,7 @@ function buildLineChart(canvas, cityData, city) {
                     grid:   { color: 'rgba(74,222,128,0.06)', drawBorder: false },
                     ticks:  {
                         color:    '#6b8c6c',
-                        callback: v => '₹' + v.toLocaleString('en-IN'),
+                        callback: v => '₹' + formatMarketPrice(v * (window.sagrWeightUnit === 'kg' ? 100 : 1)),
                     },
                     border: { color: 'rgba(74,222,128,0.1)' },
                 },
@@ -787,8 +799,8 @@ function buildBarChart(canvas, cityData, city) {
         data: {
             labels:   displayData.map(c => tCrop(c.crop)),
             datasets: [{
-                label:           `${_t('Price') || 'Price'} (₹/${_t('quintal') || 'quintal'})`,
-                data:            displayData.map(c => c.price),
+                label:           `${_t('Price') || 'Price'} (₹/${marketUnit()})`,
+                data:            displayData.map(c => marketPrice(c.price)),
                 backgroundColor: colors,
                 borderColor:     borderColors,
                 borderWidth:     1,
@@ -798,7 +810,7 @@ function buildBarChart(canvas, cityData, city) {
         },
         options: {
             ...getBaseChartOptions(
-                `${city} — ${_t('Price Comparison')} (${displayData.length} ${_t('crops') || 'crops'}, ₹/${_t('quintal') || 'quintal'})`
+                `${city} — ${_t('Price Comparison')} (${displayData.length} ${_t('crops') || 'crops'}, ₹/${marketUnit()})`
             ),
             scales: {
                 x: {
@@ -816,7 +828,7 @@ function buildBarChart(canvas, cityData, city) {
                     grid:   { color: 'rgba(74,222,128,0.06)' },
                     ticks:  {
                         color:    '#6b8c6c',
-                        callback: v => '₹' + v.toLocaleString('en-IN'),
+                        callback: v => '₹' + formatMarketPrice(v * (window.sagrWeightUnit === 'kg' ? 100 : 1)),
                     },
                     border: { color: 'rgba(74,222,128,0.1)' },
                 },
@@ -835,7 +847,7 @@ function buildBarChart(canvas, cityData, city) {
                             const crop = displayData[ctx.dataIndex];
                             const sign = crop.change >= 0 ? '▲' : '▼';
                             return [
-                                ` ₹${ctx.raw.toLocaleString('en-IN')}/${_t('quintal') || 'quintal'}`,
+                                ` ₹${formatMarketPrice(ctx.raw * (window.sagrWeightUnit === 'kg' ? 100 : 1))}/${marketUnit()}`,
                                 ` ${sign} ${Math.abs(crop.change).toFixed(1)}%  |  ${tDemand(crop.demand)} ${_t('Demand') || 'demand'}`,
                             ];
                         },
@@ -966,7 +978,7 @@ function getBaseChartOptions(titleText) {
                 bodyColor:       '#a7c4a8',
                 padding:         10,
                 callbacks: {
-                    label: ctx => ` ${ctx.dataset.label}: ₹${ctx.raw.toLocaleString('en-IN')}`,
+                    label: ctx => ` ${ctx.dataset.label}: ₹${formatMarketPrice(ctx.raw)}/${marketUnit()}`,
                 },
             },
         },
@@ -983,10 +995,8 @@ function buildPriceTable(markets) {
 
     const cities   = Object.keys(markets);
     const cropCounts = {};
-    const cropPrices = {};
     Object.values(markets).forEach(crops => crops.forEach(c => {
         cropCounts[c.crop] = (cropCounts[c.crop] || 0) + 1;
-        if (!cropPrices[c.crop]) cropPrices[c.crop] = c.price;
     }));
 
     // Sort crops by city coverage descending (most widespread major crops first), then name
@@ -1019,7 +1029,7 @@ function buildPriceTable(markets) {
             return `
             <td>
                 <div style="color:${color};font-weight:700">
-                    ₹${item.price.toLocaleString('en-IN')}
+                    ₹${formatMarketPrice(item.price)}/${marketUnit()}
                     <span style="font-size:0.62rem;opacity:0.7"> ${arrow}</span>
                 </div>
                 <div class="cr-demand demand-${dClass}" style="display:inline-flex;font-size:0.58rem;padding:1px 5px;margin-top:2px">
@@ -1038,7 +1048,7 @@ function buildPriceTable(markets) {
     if (thead) {
         thead.innerHTML =
             `<th>${_t('Crop') || 'Crop'}</th>` +
-            displayCities.map(c => `<th>${c}</th>`).join('');
+            displayCities.map(c => `<th>${c} (₹/${marketUnit()})</th>`).join('');
     }
 }
 
@@ -1050,6 +1060,8 @@ function reRenderMarket() {
     if (subtitle && search && !search.value) {
         subtitle.textContent = _t('Showing all major Indian markets') || 'Showing all major Indian markets';
     }
+    const tableSubtitle = document.querySelector('[data-translate="table_sub"]');
+    if (tableSubtitle) tableSubtitle.textContent = `${_t('Prices across all major cities') || 'Prices across all major cities'} (₹/${marketUnit()})`;
 
     const targetMarkets = currentSearchedMarkets || allMarketData;
     renderMarketGrid(targetMarkets);

@@ -3,6 +3,7 @@
 ═══════════════════════════════════════ */
 
 .market-hero { padding-bottom: 80px; background: linear-gradient(160deg, #050d06, #060e08, #0a1205); }
+body.light-theme .market-hero { background: linear-gradient(160deg, #f0f7f0, #fffbeb, #f7fee7); }
 .market-hero .orb-1 { background: radial-gradient(circle, var(--amber), transparent); }
 .market-hero .orb-2 { background: radial-gradient(circle, var(--green-2), transparent); }
 

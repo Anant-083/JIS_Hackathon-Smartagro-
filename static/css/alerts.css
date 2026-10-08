@@ -3,6 +3,7 @@
 ═══════════════════════════════════════ */
 
 .alerts-hero { padding-bottom: 120px; background: linear-gradient(160deg, #0f0505, #100808, #0a0505); position: relative; }
+body.light-theme .alerts-hero { background: linear-gradient(160deg, #fff7ed, #fef2f2, #f0f7f0); }
 .alerts-hero .orb-1 { background: radial-gradient(circle, var(--red), transparent); opacity: 0.15; }
 .alerts-hero .orb-2 { background: radial-gradient(circle, var(--amber), transparent); opacity: 0.12; }
 

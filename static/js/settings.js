@@ -50,6 +50,7 @@ window.SmartAgroSettings = (function () {
 
   function applyTempUnit(unit) {
     window.sagrTempUnit = unit;
+    document.dispatchEvent(new CustomEvent('temperatureUnitChanged'));
     if (window.weatherData && window.weatherData.current) {
       if (typeof renderHeroCard === 'function')       renderHeroCard(window.weatherData.current);
       if (typeof renderWeatherSection === 'function') renderWeatherSection(window.weatherData.current, window.weatherData.forecast);

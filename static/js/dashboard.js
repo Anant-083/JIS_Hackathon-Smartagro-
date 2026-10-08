@@ -359,12 +359,12 @@ if (txData && txData.translations && Object.keys(txData.translations).length) {
     // A real satellite lookup can take a few seconds, so it must NOT hold up
     // weather/crops from showing — fetch it in the background and fill the
     // card in whenever it resolves, instead of awaiting it up front.
-    loadVegetationHealth(lat, lon);
+    loadVegetationHealth(lat, lon, data.current);
 }
 
 /* ── Vegetation health: fetched separately so a slow satellite lookup
    never blocks the rest of the homepage from rendering ─────────────── */
-async function loadVegetationHealth(lat, lon) {
+async function loadVegetationHealth(lat, lon, current = {}) {
     const container = document.getElementById('vegHealthContainer');
     if (container) {
         container.innerHTML = `
@@ -374,7 +374,11 @@ async function loadVegetationHealth(lat, lon) {
         </div>`;
     }
     try {
-        const res = await fetch(`/api/vegetation?lat=${lat}&lon=${lon}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const params = new URLSearchParams({ lat, lon, temp: current.temp ?? 22, rain: current.rain ?? 0 });
+        const res = await fetch(`/api/vegetation?${params}`, { signal: controller.signal });
+        clearTimeout(timeout);
         const vegData = await res.json();
         if (vegData) renderVegetationHealth(vegData);
     } catch (e) {
@@ -404,7 +408,7 @@ function renderHeroCard(w) {
       </div>
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
         <div>
-          <div class="hwc-temp">${w.temp}°</div>
+          <div class="hwc-temp">${formatTemperature(w.temp)}</div>
           <div class="hwc-desc">${dt(capitalize(w.description)) || capitalize(w.description)}</div>
         </div>
         <div class="hwc-icon-large">${getWeatherEmoji(w.icon)}</div>
@@ -412,7 +416,7 @@ function renderHeroCard(w) {
       <div class="hwc-stats">
         <div class="hwc-stat"><i class="fas fa-droplets"></i> ${w.humidity}% ${dt('Humidity')}</div>
         <div class="hwc-stat"><i class="fas fa-wind"></i> ${w.wind_speed} m/s ${dt('Wind Speed')}</div>
-        <div class="hwc-stat"><i class="fas fa-temperature-half"></i> ${dt('Feels like')} ${w.feels_like}°C</div>
+        <div class="hwc-stat"><i class="fas fa-temperature-half"></i> ${dt('Feels like')} ${formatTemperature(w.feels_like)}</div>
         <div class="hwc-stat"><i class="fas fa-gauge-high"></i> ${w.pressure} hPa</div>
       </div>
     </div>`;
@@ -433,10 +437,10 @@ function renderWeatherSection(current, forecast) {
           <div style="font-size:4.5rem;line-height:1">${getWeatherEmoji(current.icon)}</div>
         </div>
         <div>
-          <div class="wpc-temp">${current.temp}°C</div>
+          <div class="wpc-temp">${formatTemperature(current.temp)}</div>
           <div class="wpc-city"><i class="fas fa-location-dot" style="color:var(--green);margin-right:4px"></i>${current.city}</div>
           <div class="wpc-desc">${dt(capitalize(current.description)) || capitalize(current.description)}</div>
-          <div class="wpc-feels">${dt('Feels like')} ${current.feels_like}°C</div>
+          <div class="wpc-feels">${dt('Feels like')} ${formatTemperature(current.feels_like)}</div>
         </div>
       </div>
       <!-- Stat cards -->
@@ -477,8 +481,8 @@ function renderWeatherSection(current, forecast) {
         <div class="fc-icon">${getWeatherEmoji(day.icon)}</div>
         <div class="fc-desc">${dt(capitalize(day.description)) || capitalize(day.description)}</div>
         <div class="fc-temps">
-          <span class="fc-max">${Math.round(day.temp_max)}°</span>
-          <span class="fc-min">${Math.round(day.temp_min)}°</span>
+          <span class="fc-max">${formatTemperature(day.temp_max)}</span>
+          <span class="fc-min">${formatTemperature(day.temp_min)}</span>
         </div>
         <div style="font-size:0.68rem;color:var(--text-3);margin-top:4px">
           <i class="fas fa-droplets" style="color:#38bdf8"></i> ${day.humidity}%
@@ -514,7 +518,7 @@ function renderStatBar(w) {
         const el = document.getElementById(id);
         if (el) el.textContent = val;
     };
-    setVal('statTemp', `${w.temp}°C`);
+    setVal('statTemp', formatTemperature(w.temp));
     setVal('statHumidity', `${w.humidity}%`);
     setVal('statWind', `${w.wind_speed} m/s`);
     setVal('statVisibility', `${w.visibility.toFixed(1)} km`);
@@ -641,7 +645,7 @@ async function loadCropRecommendations(current) {
         const label = document.getElementById('seasonLabel');
         const cityName = data.city || current.city || 'Your Location';
         if (label) {
-            label.innerHTML = `<i class="fas fa-location-dot" style="color:#4ade80;margin-right:4px"></i> <strong>${cityName}</strong> &bull; ${dt(data.season)} (${current.temp}°C, ${current.humidity}% Humidity)`;
+            label.innerHTML = `<i class="fas fa-location-dot" style="color:#4ade80;margin-right:4px"></i> <strong>${cityName}</strong> &bull; ${dt(data.season)} (${formatTemperature(current.temp)}, ${current.humidity}% Humidity)`;
         }
     } catch (err) {
         console.error('Crop API error:', err);
@@ -880,24 +884,24 @@ function renderVegetationHealth(vegData) {
     if (!container || !vegData) return;
 
     const ndvi     = vegData.ndvi;
-    const hasData  = ndvi != null && !!vegData.obs_date;   // true only when a real Sentinel-2 reading came back
-    const source   = vegData.source    || 'Sentinel-2 L2A';
+    const hasData  = ndvi != null && vegData.source === 'Satellite';
+    const source   = vegData.source || 'Unavailable';
     const cloudPct = vegData.cloud_pct != null ? `${vegData.cloud_pct}% cloud` : '';
     const scorePct = ndvi != null ? Math.max(0, Math.min(100, ndvi * 100)) : 0;
     const ndviDisplay = ndvi != null ? ndvi.toFixed(3) : '—';
 
     // Short label for the subtitle badge
-    const sourceShort = source.includes('Sentinel') ? 'Sentinel-2 NDVI' : 'Satellite NDVI';
+    const sourceShort = source === 'Satellite' ? 'Satellite' : source === 'Estimated' ? 'Estimated' : 'Unavailable';
 
     // Only claim an observation date / describe it as "real satellite reflectance"
     // when we actually got one back from the server. Never fabricate a date.
     const lastObservedLine = hasData
         ? `Last observed: ${vegData.obs_date}${cloudPct ? ' &nbsp;·&nbsp; ' + cloudPct : ''}`
-        : `No recent cloud-free imagery available for this location`;
+        : source === 'Estimated' ? `Deterministic weather and season estimate for ${vegData.estimate_date}. This is not satellite data.` : `No recent cloud-free imagery available for this location`;
 
     const descLine = hasData
         ? `Real satellite reflectance at your exact location — Copernicus ${source.replace('Copernicus ', '')} via Earth Search STAC (no login required).`
-        : `We couldn't retrieve a real Sentinel-2 reading for this exact spot right now (often due to persistent cloud cover or no recent pass). This is not a fabricated value — try again later.`;
+        : source === 'Estimated' ? `Estimated from real location, weather, and season inputs. It is not measured reflectance.` : `We couldn't retrieve a real Sentinel-2 reading for this location.`;
 
     // Same red→orange→yellow→green scale the old bar used, now driving
     // which color class the arc gauge picks up.
