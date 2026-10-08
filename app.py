@@ -1,30 +1,8 @@
-from flask import Flask, render_template, request, jsonify, g, send_file
-from concurrent.futures import ThreadPoolExecutor
-import requests
-import logging
-import uuid
-from google import genai
-from google.genai import types
-
-# ── Windows fix: force IPv4 for outbound requests ───────────────────────────
-# If a browser reaches a URL instantly but Python's `requests` times out on 
-# the exact same URL, it is almost always because requests/urllib3 tries
-# IPv6 first and your network's IPv6 path is broken or very slow, while the
-# browser silently falls back to IPv4 in milliseconds. This forces Python's
-# HTTP stack to only use IPv4, matching what the browser effectively does.
-import socket
-try:
-    import urllib3.util.connection as urllib3_conn
-
-    def _allowed_gai_family():
-        return socket.AF_INET  # IPv4 only
-
-    urllib3_conn.allowed_gai_family = _allowed_gai_family
-except Exception as _e:
-    logging.getLogger("smartagro").info(f"[AgroSmart] Could not force IPv4 (non-fatal): {_e}")
 import os
 import json
 import re
+import logging
+import socket
 import time
 import calendar
 import base64
@@ -36,6 +14,9 @@ import traceback
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+basedir = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(basedir, '.env'))
+
 # ── Structured logging ───────────────────────────────────────────────────────
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -43,6 +24,24 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("smartagro")
+
+# urllib3 asks this hook when opening a socket, so install it before requests.
+try:
+    import urllib3.util.connection as urllib3_conn
+
+    def _allowed_gai_family():
+        return socket.AF_INET
+
+    urllib3_conn.allowed_gai_family = _allowed_gai_family
+except Exception as _e:
+    logger.info("[AgroSmart] Could not force IPv4 (non-fatal): %s", _e)
+
+from flask import Flask, render_template, request, jsonify, g, send_file
+from concurrent.futures import ThreadPoolExecutor
+import requests
+import uuid
+from google import genai
+from google.genai import types
 
 class _SecretRedactionFilter(logging.Filter):
     """Prevent credentials from appearing in terminal or service logs."""
@@ -76,10 +75,6 @@ try:
 except ImportError:
     _RASTERIO_AVAILABLE = False
     logger.info("[AgroSmart] rasterio not installed – NDVI will fall back to estimation")
-
-basedir = os.path.abspath(os.path.dirname(__file__))
-load_dotenv(os.path.join(basedir, '.env'))
-
 
 app = Flask(__name__)
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -189,12 +184,14 @@ GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
 GEMMA_MODEL          = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
 GROQ_API_KEY         = os.getenv("GROQ_API_KEY", "")  # retained only for Whisper speech transcription
 _gemma_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+AI_FALLBACK_MODEL = "gemini-3.6-flash"
+_ai_call_state = threading.local()
 DEBUG_MODE          = os.getenv("FLASK_DEBUG", "0") == "1"
 
 def _gemma_generate(contents, system_instruction=None, temperature=0.5,
                     max_output_tokens=1024, response_mime_type=None,
                     thinking_level=None):
-    """Call the configured Gemma model. Return response text or raise to caller fallback."""
+    """Use Gemma first, then the shared Gemini fallback; raise if both fail."""
     if _gemma_client is None:
         raise RuntimeError("GEMINI_API_KEY is not configured")
     config = types.GenerateContentConfig(
@@ -205,16 +202,38 @@ def _gemma_generate(contents, system_instruction=None, temperature=0.5,
         thinking_config=(types.ThinkingConfig(thinking_level=thinking_level)
                          if thinking_level else None),
     )
-    response = _gemma_client.models.generate_content(
-        model=GEMMA_MODEL, contents=contents, config=config
-    )
-    text = (response.text or "").strip()
-    if not text:
-        finish_reason = ", ".join(str(c.finish_reason) for c in (response.candidates or [])) or "none"
-        raise RuntimeError(
-            f"Gemma returned no user-visible text (model={GEMMA_MODEL}, finish_reason={finish_reason})"
+    try:
+        response = _gemma_client.models.generate_content(
+            model=GEMMA_MODEL, contents=contents, config=config
         )
-    return text
+        text = (response.text or "").strip()
+        if not text:
+            raise RuntimeError(f"Gemma returned no user-visible text (model={GEMMA_MODEL})")
+        _ai_call_state.model = GEMMA_MODEL
+        return text
+    except Exception:
+        gemma_error = traceback.format_exc()
+        logger.error("[AI] Gemma model %s failed; trying %s:\n%s",
+                     GEMMA_MODEL, AI_FALLBACK_MODEL, gemma_error)
+    # Keep this config to parameters supported by the shared Gemini fallback.
+    fallback_config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        response_mime_type=response_mime_type,
+    )
+    try:
+        response = _gemma_client.models.generate_content(
+            model=AI_FALLBACK_MODEL, contents=contents, config=fallback_config
+        )
+        text = (response.text or "").strip()
+        if not text:
+            raise RuntimeError(f"{AI_FALLBACK_MODEL} returned no user-visible text")
+        _ai_call_state.model = AI_FALLBACK_MODEL
+        return text
+    except Exception:
+        logger.exception("[AI] Gemma and %s both failed", AI_FALLBACK_MODEL)
+        raise
 
 # ── Per-feature usage analytics ─────────────────────────────────────────────
 # Tracks how often each SmartAgro feature is used (page views + API calls) as
@@ -1390,7 +1409,7 @@ def fetch_agmarknet_prices(state: str) -> list:
     # can compute a REAL day-over-day change straight from this batch
     # whenever more than one date is already present, instead of only
     # discarding everything but the single latest record.
-    by_commodity_date = {}   # display_name -> {iso_date: [modal_price, ...]}
+    by_commodity_date = {}   # display_name -> {iso_date: {modal, min, max}}
     latest_meta = {}         # display_name -> {"market", "district", "arrival_date" (raw), "_iso"}
     skipped_no_price = 0
     skipped_bad_date = 0
@@ -1418,7 +1437,17 @@ def fetch_agmarknet_prices(state: str) -> list:
             continue
 
         display_name = AGMARK_COMMODITY_ALIASES.get(raw_name.lower(), raw_name.title())
-        by_commodity_date.setdefault(display_name, {}).setdefault(iso_date, []).append(modal_price)
+        date_prices = by_commodity_date.setdefault(display_name, {}).setdefault(
+            iso_date, {"modal": [], "min": [], "max": []})
+        date_prices["modal"].append(modal_price)
+        for key, aliases in (("min", ("min_price", "Min_x0020_Price", "Min Price")),
+                             ("max", ("max_price", "Max_x0020_Price", "Max Price"))):
+            try:
+                price = float(_field(r, *aliases))
+                if price > 0:
+                    date_prices[key].append(price)
+            except (TypeError, ValueError):
+                pass
 
         meta = latest_meta.get(display_name)
         if not meta or iso_date >= meta["_iso"]:
@@ -1453,13 +1482,17 @@ def fetch_agmarknet_prices(state: str) -> list:
     # of picking one arbitrary record.
     latest_by_commodity = {}
     for display_name, date_map in by_commodity_date.items():
-        per_date_avg = {d: round(sum(prices) / len(prices), 2) for d, prices in date_map.items()}
+        per_date_avg = {d: round(sum(prices["modal"]) / len(prices["modal"]), 2)
+                        for d, prices in date_map.items() if prices["modal"]}
         meta = latest_meta[display_name]
+        latest_prices = date_map[meta["_iso"]]
         latest_by_commodity[display_name] = {
             "market":       meta["market"],
             "district":     meta["district"],
             "arrival_date": meta["arrival_date"],
             "per_date":     per_date_avg,   # {iso_date: avg_modal_price} — real, multi-day
+            "min_price":    round(sum(latest_prices["min"]) / len(latest_prices["min"]), 2) if latest_prices["min"] else None,
+            "max_price":    round(sum(latest_prices["max"]) / len(latest_prices["max"]), 2) if latest_prices["max"] else None,
         }
 
     today_key = datetime.now().strftime("%Y-%m-%d")
@@ -1502,6 +1535,9 @@ def fetch_agmarknet_prices(state: str) -> list:
                     "crop":         display_name,
                     "crop_key":     display_name,
                     "price":        int(round(display_price)),
+                    "modal_price":  int(round(display_price)),
+                    "min_price":    rec["min_price"],
+                    "max_price":    rec["max_price"],
                     "change":       change,
                     "history":      history_prices,
                     "unit":         "Rs/quintal",
@@ -1786,6 +1822,10 @@ def _gemma_chat_reply(system_prompt, messages):
         content = (message.get("content") or "").strip()
         if content:
             contents.append({"role": role, "parts": [{"text": content}]})
+    # Gemini generateContent requires the final conversational turn to be from
+    # the user. Drop incomplete trailing assistant turns from client history.
+    while contents and contents[-1]["role"] != "user":
+        contents.pop()
     if not contents:
         return None
     return _gemma_generate(contents, system_instruction=system_prompt,
@@ -1809,7 +1849,7 @@ def _compile_word_matchers(words):
 
 
 _CHAT_OFF_TOPIC_WORDS = [
-    "movie", "film", "actor", "actress", "cricket", "football", "ipl",
+    "movie", "movies", "film", "films", "actor", "actors", "actress", "actresses", "cricket", "football", "ipl",
     "song", "music", "lyrics", "celebrity", "politics", "election",
     "girlfriend", "boyfriend", "relationship advice", "joke", "riddle",
     "write code", "python code", "javascript", "html", "programming",
@@ -2199,7 +2239,10 @@ def _chat_run_gateway(intents, context_data, message_text=""):
         res = _chat_weather_tool(named_city, lat, lon)
         if res.get("ok"):
             w = res["weather"]
-            line = (f"{w['temp']}°C (feels {w['feels_like']}°C), {w['description']}, "
+            fahrenheit = context_data.get("temp_unit") == "fahrenheit"
+            temp_value = lambda value: round(value * 9 / 5 + 32) if fahrenheit else round(value)
+            unit = "°F" if fahrenheit else "°C"
+            line = (f"{temp_value(w['temp'])}{unit} (feels {temp_value(w['feels_like'])}{unit}), {w['description']}, "
                     f"humidity {w['humidity']}%, wind {w['wind_speed']} km/h, rain {w['rain']}mm")
             sections.append(f"[LIVE WEATHER for {res['city']}] {line}")
             summaries.append(f"🌤️ Current weather in {res['city']}: {line}")
@@ -2224,6 +2267,7 @@ def kisan_chat():
     data = request.json or {}
     messages = data.get("messages", [])
     lang = data.get("lang", "en")
+    temp_unit = data.get("temp_unit", "celsius")
     if not messages:
         return jsonify({"error": "No messages"}), 400
 
@@ -2270,7 +2314,9 @@ def kisan_chat():
         parts = []
         if city:     parts.append(f"Location: {city}")
         if lat and lon: parts.append(f"Coordinates: {lat}, {lon}")
-        if temp:     parts.append(f"Temperature: {temp}°C")
+        if temp:
+            display_temp = round(float(temp) * 9 / 5 + 32) if temp_unit == "fahrenheit" else round(float(temp))
+            parts.append(f"Temperature: {display_temp}{'°F' if temp_unit == 'fahrenheit' else '°C'}")
         if humidity: parts.append(f"Humidity: {humidity}%")
         if rain:     parts.append(f"Rain: {rain}mm")
         if desc:     parts.append(f"Weather: {desc}")
@@ -2294,11 +2340,13 @@ def kisan_chat():
             "city": city, "lat": lat, "lon": lon,
             "temp": temp, "humidity": humidity, "rain": rain,
             "state": city,  # fetch_agmarknet_prices resolves common city/state names internally
+            "temp_unit": temp_unit,
         }, message_text=last_user_msg)
         if gateway_sections:
             location_block += "\n\n" + "\n".join(gateway_sections)
 
-    system_prompt = f"""You are Kisan Helper, a smart AI assistant for Indian farmers in the SmartAgro app. Answer ONLY: Agriculture, Crops, Soil, Pest Control, Fertilizers, Irrigation, Water Management, Govt schemes (PM-KISAN, PMFBY, KCC), SmartAgro app features. For anything unrelated, politely refuse in {lang_name}. Answer in {lang_name} (native script). Be SHORT and COMPLETE: max 4-5 bullet points or 3 sentences. Never leave an answer unfinished. App Navigation: If the user asks about checking features, provide direct Markdown links to navigate there. Use EXACTLY these formats: • Dashboard/Home/Location: [Dashboard](/) • Crop Health/Disease/Upload Photo: [Diagnose Crop](/diagnose) • Market Prices/Mandi: [Market Prices](/market) • Weather Alerts/Forecast: [Alerts](/alerts). No markdown headers (#, ##). No asterisks for bullets, use • instead. FORMATTING: Never use a hyphen or dash character (-, –, —) anywhere in your reply, not as a bullet marker, not inside or between words, and not to join a sentence. Where you would normally use a dash to join a thought, use a period, comma, or the word "and" instead. Write compound words as either one word or two separate words instead of hyphenating them.{location_block} SOIL KNOWLEDGE: You know about soil types (clay, loamy, sandy, silt, black, red, alluvial, laterite), pH levels, nutrients (NPK), organic matter, soil testing, and which crops suit which soil. APP SECTION RULES, only suggest a section when it is DIRECTLY relevant: • Suggest [Diagnose Crop](/diagnose) ONLY if the user asks about crop disease, leaf spots, pest infestation, plant infection, or crop health problems. • Suggest [Market Prices](/market) ONLY if the user asks about mandi rates, selling price, MSP, commodity prices, or where to sell crops. • Suggest [Dashboard](/) ONLY if the user asks about weather forecast, rain, temperature, or local weather conditions. • Suggest [Alerts](/alerts) ONLY if the user asks about severe weather warnings, flood, frost, storm, or pest outbreak warnings. • Mention the Helpline (1800 180 1551, bottom left button) ONLY if the user needs expert phone support. • For general farming questions (how to grow, fertilizer, irrigation, soil, seasons), answer directly WITHOUT suggesting any app section unless it truly helps. LOCATION ANSWERS: If the farmer asks what to grow, is this good weather, or questions about their location, use the FARMER'S CURRENT LOCATION & WEATHER data above to give a specific, direct answer. RESTRICTED CROPS: Never give cultivation advice, growing steps, or encouragement for tobacco, opium poppy, cannabis/hemp, or other controlled/licensed only crops, even if agronomically asked about or technically legal with a special government license. If asked, briefly note that this app focuses on common food and commercial crops and doesn't advise on licensed/controlled crops, then offer to help with a suitable alternative crop for their location instead."""
+    temperature_unit_name = "Fahrenheit (°F)" if temp_unit == "fahrenheit" else "Celsius (°C)"
+    system_prompt = f"""You are Kisan Helper, a smart AI assistant for Indian farmers in the SmartAgro app. Answer ONLY: Agriculture, Crops, Soil, Pest Control, Fertilizers, Irrigation, Water Management, Govt schemes (PM-KISAN, PMFBY, KCC), SmartAgro app features. For anything unrelated, politely refuse in {lang_name}. Answer in {lang_name} (native script). Express temperatures in {temperature_unit_name}. Be SHORT and COMPLETE: max 4-5 bullet points or 3 sentences. Never leave an answer unfinished. App Navigation: If the user asks about checking features, provide direct Markdown links to navigate there. Use EXACTLY these formats: • Dashboard/Home/Location: [Dashboard](/) • Crop Health/Disease/Upload Photo: [Diagnose Crop](/diagnose) • Market Prices/Mandi: [Market Prices](/market) • Weather Alerts/Forecast: [Alerts](/alerts). No markdown headers (#, ##). No asterisks for bullets, use • instead. FORMATTING: Never use a hyphen or dash character (-, –, —) anywhere in your reply, not as a bullet marker, not inside or between words, and not to join a sentence. Where you would normally use a dash to join a thought, use a period, comma, or the word "and" instead. Write compound words as either one word or two separate words instead of hyphenating them.{location_block} SOIL KNOWLEDGE: You know about soil types (clay, loamy, sandy, silt, black, red, alluvial, laterite), pH levels, nutrients (NPK), organic matter, soil testing, and which crops suit which soil. APP SECTION RULES, only suggest a section when it is DIRECTLY relevant: • Suggest [Diagnose Crop](/diagnose) ONLY if the user asks about crop disease, leaf spots, pest infestation, plant infection, or crop health problems. • Suggest [Market Prices](/market) ONLY if the user asks about mandi rates, selling price, MSP, commodity prices, or where to sell crops. • Suggest [Dashboard](/) ONLY if the user asks about weather forecast, rain, temperature, or local weather conditions. • Suggest [Alerts](/alerts) ONLY if the user asks about severe weather warnings, flood, frost, storm, or pest outbreak warnings. • Mention the Helpline (1800 180 1551, bottom left button) ONLY if the user needs expert phone support. • For general farming questions (how to grow, fertilizer, irrigation, soil, seasons), answer directly WITHOUT suggesting any app section unless it truly helps. LOCATION ANSWERS: If the farmer asks what to grow, is this good weather, or questions about their location, use the FARMER'S CURRENT LOCATION & WEATHER data above to give a specific, direct answer. RESTRICTED CROPS: Never give cultivation advice, growing steps, or encouragement for tobacco, opium poppy, cannabis/hemp, or other controlled/licensed only crops, even if agronomically asked about or technically legal with a special government license. If asked, briefly note that this app focuses on common food and commercial crops and doesn't advise on licensed/controlled crops, then offer to help with a suitable alternative crop for their location instead."""
 
     try:
         reply = _gemma_chat_reply(system_prompt, messages)
@@ -2439,7 +2487,7 @@ def ai_is_crop_image(image_b64):
         return True, None
 
 
-def _run_vision_pass(image_b64, prompt, sys_prompt, model, temperature):
+def _run_vision_pass(image_b64, prompt, sys_prompt, temperature):
     """Run one Gemma image diagnosis pass and return parsed JSON, or None on failure."""
     image = types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg")
     raw = _gemma_generate(
@@ -2449,7 +2497,8 @@ def _run_vision_pass(image_b64, prompt, sys_prompt, model, temperature):
     )
     cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    return json.loads(match.group()) if match else None
+    parsed = json.loads(match.group()) if match else None
+    return (parsed, getattr(_ai_call_state, "model", GEMMA_MODEL)) if parsed else None
 
 def _diseases_agree(name_a, name_b):
     """Fuzzy-match two disease name strings so small phrasing differences between passes still count as agreement, while genuinely different diagnoses are correctly flagged as a disagreement."""
@@ -2545,27 +2594,27 @@ def diagnose_crop():
     # ── Step 2: ensemble / self-consistency passes ──────────────────────
     # Repeat Gemma at different temperatures for a self-consistency cross-check.
     pass_temperatures = [0.2, 0.6, 0.9]
-    pass_plan = [(i, GEMMA_MODEL, pass_temperatures[i % len(pass_temperatures)])
+    pass_plan = [(i, pass_temperatures[i % len(pass_temperatures)])
                  for i in range(ENSEMBLE_PASSES)]
     pass_outcomes = [None] * len(pass_plan)
 
-    def _run_pass(i, model, temp):
+    def _run_pass(i, temp):
         try:
-            return _run_vision_pass(image_b64, prompt, sys_prompt, model, temp)
+            return _run_vision_pass(image_b64, prompt, sys_prompt, temp)
         except Exception as e:
-            logger.warning(f"[Diagnose] pass {i} ({model}) failed: {e}")
+            logger.warning(f"[Diagnose] pass {i} failed: {e}")
             return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(pass_plan)) as executor:
         future_to_pass = {
-            executor.submit(_run_pass, i, model, temp): (i, model)
-            for i, model, temp in pass_plan
+            executor.submit(_run_pass, i, temp): i
+            for i, temp in pass_plan
         }
         for future in concurrent.futures.as_completed(future_to_pass):
-            i, model = future_to_pass[future]
-            parsed = future.result()
-            if parsed and parsed.get("disease"):
-                pass_outcomes[i] = (parsed, model)
+            i = future_to_pass[future]
+            outcome = future.result()
+            if outcome and outcome[0].get("disease"):
+                pass_outcomes[i] = outcome
 
     results, models_used = [], []
     for outcome in pass_outcomes:
@@ -3715,4 +3764,4 @@ def get_seasonal_alerts():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7860, debug=DEBUG_MODE)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "7860")), debug=DEBUG_MODE)

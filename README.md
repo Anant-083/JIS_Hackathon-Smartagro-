@@ -28,7 +28,7 @@ Farmers can have difficulty finding farming information in their preferred langu
 | Problem | Feature | How it helps |
 |---|---|---|
 | Farming information is often hard to access in a preferred language | Multilingual interface and Kisan Helper | Translates page content and lets farmers ask farming questions in supported languages. |
-| Crop disease identification takes time | Crop diagnosis | Accepts a crop image, checks whether it appears to show plant material, then asks Gemma for an analysis. |
+| Crop disease identification takes time | Crop diagnosis | Accepts a crop image, checks whether it appears to show plant material, then asks the shared Gemma and Gemini fallback helper for an analysis. |
 | Mandi rates are scattered | Mandi prices | Displays government Agmarknet observations by supported city, with saved price history as a fallback. |
 | Weather can damage crops | Weather and alerts | Shows current conditions, forecast data, and rule or AI generated crop risk guidance. |
 | Literacy and connectivity can be limited | Voice controls and PWA caching | Supports speech input and spoken replies; previously visited pages and static files can be available offline. |
@@ -37,15 +37,15 @@ Farmers can have difficulty finding farming information in their preferred langu
 
 ### AI chatbot
 
-Kisan Helper uses Gemma through the Gemini API. It is instructed to answer agriculture and SmartAgro questions, refuses off-topic requests in a set of localized replies, and can fetch weather or mandi context for matching questions. Without a working Gemini key or during a provider error, it returns a localized fallback. The configured model defaults to `gemma-4-26b-a4b-it` and can be changed with `GEMMA_MODEL`.
+All model-backed features call one shared generation helper. It tries the configured Gemma model first (`gemma-4-26b-a4b-it` by default, configurable with `GEMMA_MODEL`) and then tries `gemini-3.6-flash` if Gemma errors or returns no text. Both use `GEMINI_API_KEY`; if both calls fail, the feature returns its own fallback or error. The fallback request uses the Gemini GenerateContent API with supported generation fields and omits Gemma's `thinking_config`. Chat history is trimmed so its final turn is always a user turn. Off-topic questions are refused before any model call using localized canned replies.
 
 ### Crop disease diagnosis
 
-Upload an image for an AI generated crop health assessment. The backend checks image data and size and uses an image classification prompt to reject non-plant images before generating a diagnosis. Provider failures return an error response. A real diagnosis depends on a working Gemini API key; this environment’s provider response was not independently verified.
+Upload an image for an AI generated crop health assessment. The backend validates the base64 payload and size, then asks the shared AI helper to classify whether it shows plant material before generating two diagnosis passes. The response identifies the model used for each pass. If the classifier call itself fails at both model providers, the current code allows diagnosis to continue and the later vision pass may still fail. No live model provider response has been verified in this checkout.
 
 ### Mandi prices
 
-Prices are fetched from data.gov.in Agmarknet data. The interface can show rupees per quintal or per kilogram; the kilogram amount is the quintal amount divided by 100 and shown to two decimal places. The preference is saved in browser storage and applies to cards, ticker, table, and charts. If the live feed is empty or unavailable, the backend can use its persisted market history; it displays no invented price where neither source has a value.
+Prices are fetched from data.gov.in Agmarknet data. The interface can show rupees per quintal or per kilogram; kilogram values are quintal values divided by 100 and shown to two decimal places. The saved preference applies to price cards, ticker, table, and charts. Live min/max/modal values are displayed when returned by Agmarknet; history fallback contains saved modal prices and may not have min/max values. If the live feed is empty or unavailable, persisted market history is used where present; no price is invented when neither source has one.
 
 ### Weather and 15-day risk outlook
 
@@ -61,7 +61,7 @@ The gauge is explicitly labeled **Satellite**, **Estimated**, or **Unavailable**
 
 ### Voice, language, settings, and install
 
-Kisan Helper supports browser speech synthesis and microphone recording transcribed with Groq Whisper. Language selection translates the interface and sets the chatbot response language; the available language codes are defined in `app.py` and the page translation resources. Settings include light/dark/system themes, Celsius/Fahrenheit, quintal/kg, notification controls, and voice volume. Preferences persist in local storage. The PWA manifest and service worker support installation in compatible browsers and cache visited pages and static assets for offline use.
+Kisan Helper supports browser speech synthesis and browser speech recognition; recorded audio can also be sent to Groq Whisper for transcription. Language selection translates page content and sets the chatbot response language. Settings include light/dark/system themes, Celsius/Fahrenheit, quintal/kg, notification controls, text-to-speech and voice-input toggles, and voice volume. Preferences persist in local storage. The manifest and service worker provide install metadata and cache visited pages and static assets for offline use in compatible browsers. Browser permission, speech-language availability, and install prompts vary by browser.
 
 ## Why it is useful
 
@@ -75,7 +75,7 @@ Kisan Helper supports browser speech synthesis and microphone recording transcri
 
 | Service or library | Used for | Environment variable |
 |---|---|---|
-| Google Gemini API with Gemma | Chat, image diagnosis, crop recommendations, selected alerts and translations | `GEMINI_API_KEY`; optional model override `GEMMA_MODEL` |
+| Google Gemini API | Gemma first, then `gemini-3.6-flash` fallback for chat, image diagnosis, crop recommendations, selected alerts, and translations | `GEMINI_API_KEY`; optional Gemma model override `GEMMA_MODEL` |
 | Groq Whisper | Chatbot speech-to-text | `GROQ_API_KEY` |
 | OpenWeatherMap | Current weather and short forecast | `OPENWEATHER_API_KEY` |
 | Visual Crossing | Extended daily forecast | `VISUALCROSSING_API_KEY` |
@@ -145,10 +145,10 @@ Edit `.env` with your own provider keys. Never commit it. Then run:
 python app.py
 ```
 
-The app listens on the configured Flask development port. For production-like local serving:
+`python app.py` listens on `PORT` (default `7860`). For production-like local serving:
 
 ```bash
-gunicorn --bind 0.0.0.0:7860 --workers 1 --threads 8 --timeout 60 app:app
+PORT=7860 gunicorn --bind 0.0.0.0:7860 --workers 1 --threads 8 --timeout 60 app:app
 ```
 
 ### Environment variables
@@ -161,6 +161,7 @@ gunicorn --bind 0.0.0.0:7860 --workers 1 --threads 8 --timeout 60 app:app
 | `VISUALCROSSING_API_KEY` | Extended forecast days | No; outlook may be shorter |
 | `GROQ_API_KEY` | Whisper voice transcription | No; voice transcription unavailable without it |
 | `DATA_GOV_API_KEY` | Agmarknet feed access | For current mandi data |
+| `PORT` | HTTP listen port; defaults to `7860` | No |
 | `FLASK_DEBUG` | Enables gated debug endpoints when set to `1` | No; keep `0` in deployment |
 | `LOG_LEVEL` | Python logging level | No |
 | `DIAGNOSIS_LOG_DIR` | Local diagnosis audit log directory | No |
@@ -199,6 +200,8 @@ Render free instances may sleep when idle. Persistent files such as market histo
 | POST | `/api/chat` | Kisan Helper chat |
 | POST | `/api/stt` | Groq Whisper speech transcription |
 | POST | `/api/diagnose` | Crop image diagnosis |
+| GET | `/api/diagnose-log`, `/api/diagnose-log/image/<path:filename>`, `/api/diagnose-log/accuracy` | Diagnosis review data, debug mode only |
+| POST | `/api/diagnose-log/review` | Save human review, debug mode only |
 | POST | `/api/crop-recommendations` | Crop suggestions |
 | POST | `/api/alerts` | Current weather alerts |
 | POST | `/api/alerts-forecast` | Forecast-day alerts |
@@ -207,6 +210,7 @@ Render free instances may sleep when idle. Persistent files such as market histo
 | POST | `/api/crop-risk` | Crop risk analysis |
 | POST | `/api/translate-market`, `/api/translate-alerts`, `/api/translate-dashboard`, `/api/translate-diagnose`, `/api/translate-diagnosis-result` | Translate page content |
 | POST | `/api/translate-market/clear` | Clear market translation cache |
+| GET | `/api/debug-market`, `/api/debug-extended-forecast` | Provider diagnostics, only when `FLASK_DEBUG=1` |
 | GET | `/api/usage` | Read usage counters |
 | POST | `/api/usage/reset` | Reset usage counters |
 
@@ -214,9 +218,9 @@ Debug and diagnosis review routes are gated by `FLASK_DEBUG=1`; leave debug mode
 
 ## How it works
 
-**Chat:** the browser sends the conversation, language, and available weather context. The server detects supported live-data intents, fetches relevant data, and supplies that context to Gemma. Off-topic requests are refused before the model call.
+**Chat:** the browser sends the conversation, language, temperature preference, and available weather context. The server detects supported live-data intents, fetches relevant data, and supplies that context to the shared Gemma then Gemini fallback helper. Off-topic requests are refused before the model call.
 
-**Diagnosis:** the browser posts a validated image payload. The server checks size and image decoding, asks Gemma whether it is plant material, then generates and combines diagnosis analysis. Provider and validation errors are returned to the page.
+**Diagnosis:** the browser posts a validated image payload. The server checks size and base64 decoding, asks the shared helper whether it is plant material, then generates and combines diagnosis analysis. Provider and validation errors are returned to the page.
 
 **Market fallback:** the server requests Agmarknet observations by state and saves price history. If the live feed has no usable data, the most recent saved genuine observations are used where available; otherwise the city is shown without fabricated prices.
 
@@ -225,7 +229,7 @@ Debug and diagnosis review routes are gated by `FLASK_DEBUG=1`; leave debug mode
 - Render free-tier services can cold start after idle periods.
 - Government Agmarknet data and its API can be delayed or unavailable; cached history can also be absent on ephemeral storage.
 - NDVI is estimated when `rasterio`, imagery, or a readable scene is unavailable. Estimated values are not satellite measurements.
-- The included runtime pins Python 3.11.9. Python 3.14 is not verified, and the pinned rasterio/numpy versions may not support it.
+- The included runtime and Docker base pin Python 3.11.9. This checkout was run with Python 3.14.2; a Docker build and Python 3.11.9 runtime were not run here.
 - Weather and extended forecast coverage depends on valid provider credentials and provider availability. The outlook only reports returned forecast days.
 - Browser speech recognition and installation prompts vary by browser. Whisper transcription needs `GROQ_API_KEY`.
 - This environment did not have rasterio installed, and live provider responses were not verified as part of repository checks.

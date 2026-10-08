@@ -392,7 +392,8 @@ function renderMarketGrid(markets) {
                         <div class="cr-name" data-crop-key="${crop.crop_key || crop.crop}" title="${tCrop(crop.crop)}">${tCrop(crop.crop)}</div>
                         <div class="cr-price-wrap">
                             <div class="cr-price">₹${formatMarketPrice(crop.price)}</div>
-                            <div class="cr-unit">/${marketUnit()}</div>
+                            <div class="cr-unit">Modal /${marketUnit()}</div>
+                            ${(crop.min_price != null || crop.max_price != null) ? `<div class="cr-range">Min ₹${crop.min_price == null ? '—' : formatMarketPrice(crop.min_price)} · Max ₹${crop.max_price == null ? '—' : formatMarketPrice(crop.max_price)}</div>` : ''}
                         </div>
                         <div class="cr-change ${isUp ? 'up' : 'down'}">
                             <i class="fas fa-arrow-${isUp ? 'up' : 'down'}"></i>
@@ -1029,9 +1030,10 @@ function buildPriceTable(markets) {
             return `
             <td>
                 <div style="color:${color};font-weight:700">
-                    ₹${formatMarketPrice(item.price)}/${marketUnit()}
+                    Modal ₹${formatMarketPrice(item.price)}/${marketUnit()}
                     <span style="font-size:0.62rem;opacity:0.7"> ${arrow}</span>
                 </div>
+                ${(item.min_price != null || item.max_price != null) ? `<div style="font-size:.62rem;color:var(--text-2)">Min ₹${item.min_price == null ? '—' : formatMarketPrice(item.min_price)} · Max ₹${item.max_price == null ? '—' : formatMarketPrice(item.max_price)}</div>` : ''}
                 <div class="cr-demand demand-${dClass}" style="display:inline-flex;font-size:0.58rem;padding:1px 5px;margin-top:2px">
                     ${tDemand(item.demand)}
                 </div>

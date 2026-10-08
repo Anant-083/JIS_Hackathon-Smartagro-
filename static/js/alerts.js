@@ -254,11 +254,17 @@ async function loadAlertsData(lat, lon) {
     const alertsSection = document.getElementById('alertsSection');
     if (alertsSection) alertsSection.style.display = '';
 
+    const weatherController = new AbortController();
+    const weatherTimeout = setTimeout(() => weatherController.abort(), 12000);
     try {
         // 1. Fetch weather (includes the 6-day forecast we need for
         // "Check Upcoming Risks" later, without a second network call)
-        const weatherRes = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
+        const weatherRes = await fetch(`/api/weather?lat=${lat}&lon=${lon}`, { signal: weatherController.signal });
+        if (!weatherRes.ok) throw new Error(`Weather request failed (${weatherRes.status})`);
         const weatherData = await weatherRes.json();
+        if (!weatherData.current || !Array.isArray(weatherData.forecast) || !weatherData.forecast.length) {
+            throw new Error('Weather response did not include current conditions and forecast days');
+        }
         currentWeather = weatherData.current;
         currentForecast = weatherData.forecast || [];
 
@@ -310,14 +316,19 @@ async function loadAlertsData(lat, lon) {
 
     } catch (err) {
         console.error('Alerts load error:', err);
-        showMonthlyAlertsError('Could not load weather data for the risk outlook. Check your connection and retry.');
+        showMonthlyAlertsError(err.name === 'AbortError'
+            ? 'Weather request timed out. Check your connection and retry.'
+            : 'Could not load weather data for the risk outlook. Check your connection and retry.');
         showToast('Could not load alert data.', 'error');
-        document.getElementById('alertsList').innerHTML = `
+        const alertsList = document.getElementById('alertsList');
+        if (alertsList) alertsList.innerHTML = `
       <div style="text-align:center;padding:60px 0;color:var(--text-3)">
         <i class="fas fa-exclamation-triangle" style="font-size:2rem;margin-bottom:12px;color:var(--amber)"></i>
         <p>Could not load alerts. Please try again.</p>
         <button class="btn-secondary" style="margin-top:16px" onclick="requestAlertsLocation()">Retry</button>
       </div>`;
+    } finally {
+        clearTimeout(weatherTimeout);
     }
 }
 

@@ -9,6 +9,7 @@
 api_usage_tracker.json
 ndvi_cache.json
 usage_stats.json
+/runtime/
 diagnose_html_diff.txt
 diagnose_js_diff.txt
 main_css_diff.txt

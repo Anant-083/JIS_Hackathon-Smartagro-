@@ -9,6 +9,8 @@ window.SmartAgroSettings = (function () {
     tempUnit:       'celsius',
     weightUnit:     'quintal',
     notifications:  true,
+    textToSpeech:   true,
+    voiceInput:     true,
     notifFrequency: '08:00',
     theme:          'dark',
     fontSize:       'medium',
@@ -38,6 +40,8 @@ window.SmartAgroSettings = (function () {
       case 'tempUnit':       applyTempUnit(value);       break;
       case 'weightUnit':     applyWeightUnit(value);     break;
       case 'notifications':  applyNotifications(value);  break;
+      case 'textToSpeech':   window.sagrTextToSpeechEnabled = !!value; break;
+      case 'voiceInput':     window.sagrVoiceInputEnabled = !!value; break;
       case 'notifFrequency': applyNotifFrequency(value); break;
       case 'theme':          applyTheme(value);          break;
       case 'fontSize':       applyFontSize(value);       break;
@@ -207,6 +211,8 @@ window.SmartAgroSettings = (function () {
       // Font Size
       + '<div class="settings-section">'
       + '<div class="settings-section-title"><i class="fas fa-text-height"></i> Accessibility</div>'
+      + '<div class="settings-row settings-row-toggle"><label class="settings-label" for="settingsTtsToggle">Text-to-speech<span class="settings-label-sub">Allow spoken chatbot replies</span></label><label class="settings-toggle-switch"><input type="checkbox" id="settingsTtsToggle"' + (get('textToSpeech') ? ' checked' : '') + '><span class="settings-toggle-track"><span class="settings-toggle-thumb"></span></span></label></div>'
+      + '<div class="settings-row settings-row-toggle"><label class="settings-label" for="settingsVoiceToggle">Voice input<span class="settings-label-sub">Allow microphone input in Kisan Helper</span></label><label class="settings-toggle-switch"><input type="checkbox" id="settingsVoiceToggle"' + (get('voiceInput') ? ' checked' : '') + '><span class="settings-toggle-track"><span class="settings-toggle-thumb"></span></span></label></div>'
       + '<div class="settings-row">'
       + '<label class="settings-label">Font Size<span class="settings-label-sub">Adjust text size across the app</span></label>'
       + '<div class="settings-font-group" id="fontSizeGroup">'
@@ -287,6 +293,11 @@ window.SmartAgroSettings = (function () {
         set('notifications', notifToggle.checked);
       }
     });
+
+    var ttsToggle = document.getElementById('settingsTtsToggle');
+    if (ttsToggle) ttsToggle.addEventListener('change', function() { set('textToSpeech', ttsToggle.checked); });
+    var voiceToggle = document.getElementById('settingsVoiceToggle');
+    if (voiceToggle) voiceToggle.addEventListener('change', function() { set('voiceInput', voiceToggle.checked); });
 
     var notifTime = document.getElementById('settingsNotifTime');
     if (notifTime) notifTime.addEventListener('change', function() {

@@ -13,6 +13,7 @@ const STATIC_ASSETS = [
     '/market',
     '/alerts',
     '/offline',
+    '/static/manifest.json',
     '/static/css/main.css',
     '/static/css/dashboard.css',
     '/static/css/diagnose.css',
@@ -88,7 +89,6 @@ self.addEventListener('fetch', event => {
         return;
     }
 
-    // Static assets — cache first, fallback to network
     // Static assets — network first, fallback to cache (so local edits
     // always show up; offline users still get the last-cached version)
     event.respondWith(

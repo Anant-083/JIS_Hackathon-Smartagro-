@@ -682,6 +682,7 @@ async function renderDiagnosisResults(data) {
           <span class="result-badge badge-confidence">
             <i class="fas fa-circle-check"></i> ${data.confidence || 0}% ${lConf}
           </span>
+          ${data._models_used?.length ? `<span class="result-badge"><i class="fas fa-microchip"></i> ${data._models_used.join(', ')}</span>` : ''}
           ${severity ? `<span class="result-badge ${sevClass}">${severity} ${lSev}</span>` : ''}
           ${affectedPart ? `
           <span class="result-badge" style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);color:var(--amber)">

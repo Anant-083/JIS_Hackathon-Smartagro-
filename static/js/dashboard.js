@@ -384,7 +384,7 @@ async function loadVegetationHealth(lat, lon, current = {}) {
     } catch (e) {
         // Non-fatal — leave the card showing "Data Unavailable" rather than
         // breaking the rest of the page.
-        renderVegetationHealth({ ndvi: null, status: 'Data Unavailable', obs_date: null, source: 'Satellite', cloud_pct: null });
+        renderVegetationHealth({ ndvi: null, status: 'Data Unavailable', obs_date: null, source: 'Unavailable', cloud_pct: null });
     }
 }
 
@@ -891,7 +891,7 @@ function renderVegetationHealth(vegData) {
     const ndviDisplay = ndvi != null ? ndvi.toFixed(3) : '—';
 
     // Short label for the subtitle badge
-    const sourceShort = source === 'Satellite' ? 'Satellite' : source === 'Estimated' ? 'Estimated' : 'Unavailable';
+    const sourceShort = source === 'Satellite' && hasData ? 'Satellite' : source === 'Estimated' && ndvi != null ? 'Estimated' : 'Unavailable';
 
     // Only claim an observation date / describe it as "real satellite reflectance"
     // when we actually got one back from the server. Never fabricate a date.

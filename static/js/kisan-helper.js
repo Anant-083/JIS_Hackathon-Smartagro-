@@ -500,6 +500,7 @@ body.light-theme .kw-speak-btn  { border-color: rgba(22,101,52,.25); color: rgba
   let activeTyper   = null;
   let finalTranscript = '';   // accumulates only isFinal segments
   let currentSessionId = Date.now().toString();
+  let messageIdCounter = 0;
 
   /* ── Language data — all 23 codes app.py's LANG_NAMES supports ───── */
   const LANG_NAMES = {
@@ -807,7 +808,7 @@ body.light-theme .kw-speak-btn  { border-color: rgba(22,101,52,.25); color: rgba
   function addBotMsg(text, skipTypewriter = false) {
     const list = document.getElementById('kisanMessages');
     if (!list) return;
-    const id  = 'msg_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
+    const id  = `msg_${Date.now()}_${++messageIdCounter}`;
     const div = document.createElement('div');
     div.className    = 'kw-msg bot';
     div.id           = id;
@@ -948,6 +949,7 @@ body.light-theme .kw-speak-btn  { border-color: rgba(22,101,52,.25); color: rgba
         body: JSON.stringify({
           messages:        chatHistory.slice(-4),
           lang:            getAppLang(),
+          temp_unit:       window.sagrTempUnit || 'celsius',
           weather_context: weatherContext,
         }),
       });
@@ -973,6 +975,7 @@ body.light-theme .kw-speak-btn  { border-color: rgba(22,101,52,.25); color: rgba
 
   /* ── Text to Speech ───────────────────────────────────────────────── */
   window.toggleSpeak = function (msgId) {
+    if (window.sagrTextToSpeechEnabled === false) return;
     const div = document.getElementById(msgId);
     const btn = document.getElementById('speak_' + msgId);
     if (!div || !btn) return;
@@ -993,6 +996,7 @@ body.light-theme .kw-speak-btn  { border-color: rgba(22,101,52,.25); color: rgba
     utterance.lang   = speechLang;
     utterance.rate   = 0.88;
     utterance.pitch  = 1;
+    utterance.volume = Math.max(0, Math.min(1, Number(window.sagrAudioVolume ?? 80) / 100));
     if (voice) utterance.voice = voice;
 
     if (!voice && lang !== 'en') {
@@ -1051,6 +1055,10 @@ body.light-theme .kw-speak-btn  { border-color: rgba(22,101,52,.25); color: rgba
   }
 
   window.toggleKisanMic = function () {
+    if (window.sagrVoiceInputEnabled === false) {
+      showKisanToast('Voice input is disabled in Settings.', 'warning');
+      return;
+    }
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { showKisanToast('Voice not supported. Use Chrome browser.'); return; }
     if (isListening) {
