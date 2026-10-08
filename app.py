@@ -579,10 +579,11 @@ def readyz():
 
 # ─── Weather API ─────────────────────────────────────────────────────────────
 _weather_response_cache = {}
+_WEATHER_RESPONSE_CACHE_TTL = 5 * 60
 
 # ─── Visual Crossing — real extended forecast (out to ~15 days) ─────────────
 # OpenWeather's free tier only gives ~5-6 real forecast days. Visual Crossing
-# extends that with real data for roughly the rest of the Alerts 30-day
+# extends that with real data for roughly the rest of the Alerts 15-day
 # calendar's span instead of leaving those days blank/unavailable. Days
 # beyond ~15-16 still have no real forecast anywhere and are honestly
 # reported as unavailable, never invented. (Previously used Open-Meteo here —
@@ -730,6 +731,10 @@ def get_weather():
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid location"}), 400
 
+    cached_weather = _weather_response_cache.get(weather_cache_key)
+    if cached_weather and time.time() - cached_weather["ts"] < _WEATHER_RESPONSE_CACHE_TTL:
+        return jsonify(cached_weather["data"])
+
 
     current_url  = (f"https://api.openweathermap.org/data/2.5/weather"
                     f"?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric")
@@ -786,14 +791,14 @@ def get_weather():
             d["source"] = "openweather"
 
         # Extend with real Visual Crossing days for any date OpenWeather
-        # doesn't already cover, up to 16 total days. Still real forecast
+        # doesn't already cover, up to 15 total days. Still real forecast
         # data, not invented — just a second source with longer real range
         # than OpenWeather's free tier gives. (Previously Open-Meteo; swapped
         # out because its free quota is shared across every app on Render's
         # shared IP and kept coming back empty.)
         covered_dates = {d["date"] for d in openweather_days}
         extra_days = [d for d in extended_days if d["date"] not in covered_dates]
-        forecast_list = sorted(openweather_days + extra_days, key=lambda d: d["date"])[:16]
+        forecast_list = sorted(openweather_days + extra_days, key=lambda d: d["date"])[:15]
         logger.info(f"[Weather] openweather_days={len(openweather_days)} "
               f"extended_days={len(extended_days)} "
               f"merged_total={len(forecast_list)}")
@@ -816,14 +821,16 @@ def get_weather():
             },
             "forecast": forecast_list,
         }
-        _bounded_cache_set(_weather_response_cache, weather_cache_key, weather_result, max_entries=300)
+        _bounded_cache_set(_weather_response_cache, weather_cache_key, {
+            "ts": time.time(),
+            "data": weather_result,
+        }, max_entries=300)
         return jsonify(weather_result)
     except Exception as e:
         logger.warning(f"[Weather error] {e}")
-        cached_weather = _weather_response_cache.get(weather_cache_key)
         if cached_weather:
             logger.info("[Weather] Returning last cached result after fetch failure")
-            return jsonify(cached_weather)
+            return jsonify(cached_weather["data"])
         return jsonify({"error": "Weather data is temporarily unavailable. Please retry."}), 503
 
 
@@ -3009,8 +3016,13 @@ def get_alerts_forecast():
         return jsonify({"error": "forecast array required"}), 400
 
     today_alerts = data.get("today_alerts")
+    use_ai = data.get("use_ai", True)
     
-    if today_alerts and len(forecast) > 0:
+    if not use_ai:
+        # The 15-day outlook uses the local rule engine so it stays fast and
+        # does not make a large AI request just to populate calendar tiles.
+        ai_per_day_map = {}
+    elif today_alerts and len(forecast) > 0:
         today_date = forecast[0].get("date")
         forecast_for_ai = forecast[1:]
         ai_per_day_map = _ai_alerts_for_forecast(city, lat, lon, forecast_for_ai)
@@ -3658,11 +3670,11 @@ def get_monthly_alerts():
     daily_alerts = { d.get("date"): d for d in data.get("daily_alerts", []) }
 
     # Rolling window matching the real forecast range actually available
-    # (OpenWeather ~5-6 days + Visual Crossing extension, capped at 16 by
+    # (OpenWeather ~5-6 days + Visual Crossing extension, capped at 15 by
     # /api/weather) — NOT bounded to the current calendar month. Deliberately
     # spills into next month when the window crosses a month boundary, since
     # the point is "next N real days," not "rest of this month."
-    window_days = len(forecast) if forecast else 15
+    window_days = min(len(forecast), 15) if forecast else 15
 
     for i in range(window_days):
         curr_date = base_date + timedelta(days=i)

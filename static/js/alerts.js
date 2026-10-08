@@ -1274,25 +1274,30 @@ async function loadMonthlyAlerts() {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    // The extended daily-alert endpoint may call the AI provider on a cold
+    // server, so give it enough time to finish before offering a retry.
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
     try {
         // The weekly view above is capped to 7 days on purpose, but the
         // Monthly calendar is a rolling window covering the full real
-        // forecast range (up to ~15-16 real days from Visual Crossing +
+        // forecast range (up to 15 real days from Visual Crossing +
         // OpenWeather), not bounded to the current calendar month — it can
         // and will spill into next month near month-end. If that real
         // window is longer than what the weekly fetch already covered,
         // fetch alerts for the full window here instead of reusing the
         // 7-day-capped dailyAlertsData.
-        let monthlyDailyAlerts = dailyAlertsData || [];
-        if (currentForecast.length > (dailyAlertsData ? dailyAlertsData.length : 0)) {
+        const monthlyForecast = currentForecast.slice(0, 15);
+        let monthlyDailyAlerts = (dailyAlertsData || []).filter(d =>
+            monthlyForecast.some(f => f.date === d.date));
+        if (monthlyForecast.length > monthlyDailyAlerts.length) {
             try {
                 const extRes = await fetch('/api/alerts-forecast', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        forecast: currentForecast,
+                        forecast: monthlyForecast,
                         today_alerts: allAlerts,
+                        use_ai: false,
                         city: currentWeather ? currentWeather.city : '',
                         lat: currentWeather ? currentWeather.lat : null,
                         lon: currentWeather ? currentWeather.lon : null
@@ -1314,7 +1319,7 @@ async function loadMonthlyAlerts() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                forecast: currentForecast,
+                forecast: monthlyForecast,
                 daily_alerts: monthlyDailyAlerts
             }),
             signal: controller.signal
@@ -1368,7 +1373,7 @@ async function loadMonthlyAlerts() {
     } catch (err) {
         console.error("Monthly alerts error:", err);
         showMonthlyAlertsError(err.name === 'AbortError'
-            ? 'The risk outlook request timed out after 10 seconds. Please retry.'
+            ? 'The risk outlook is taking longer than expected. Check your connection and retry.'
             : 'Could not load the risk outlook. Check your connection and retry.');
     } finally {
         clearTimeout(timeoutId);
