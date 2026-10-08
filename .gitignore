@@ -7,9 +7,12 @@
 #    committed — was previously tracked and caused noisy diffs on every
 #    deploy) ───────────────────────────────────────────────────────────────
 api_usage_tracker.json
-market_history_cache.json
 ndvi_cache.json
 usage_stats.json
+diagnose_html_diff.txt
+diagnose_js_diff.txt
+main_css_diff.txt
+req_clean.txt
 *.log
 
 # ── Python ───────────────────────────────────────────────────────────────

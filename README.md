@@ -8,12 +8,12 @@ app_port: 7860
 pinned: false
 ---
 
-# 🌿 SmartAgro — AI-Powered Precision Agriculture Platform
+# 🌿 SmartAgro — Open-Source, Gemma-Powered Agriculture
 <div align="center">
 
 # 🌾 SmartAgro
 
-**AI-powered agricultural advisory for Indian farmers**
+**Open-source, Gemma-powered agricultural advisory for Indian farmers**
 
 Weather-driven alerts · Crop disease diagnosis · Live mandi prices · Satellite vegetation health · Multilingual AI chatbot
 
@@ -23,8 +23,8 @@ Weather-driven alerts · Crop disease diagnosis · Live mandi prices · Satellit
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Hugging Face Spaces](https://img.shields.io/badge/HF%20Spaces-deploy-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/spaces)
 
-[![Groq](https://img.shields.io/badge/Groq-AI-F55036?style=flat-square&logo=groq&logoColor=white)](https://groq.com/)
-[![Gemini](https://img.shields.io/badge/Gemini-Vision-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![Gemma](https://img.shields.io/badge/AI-Gemma-4285F4?style=flat-square&logo=google&logoColor=white)](https://ai.google.dev/gemma)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](./LICENSE)
 [![OpenWeatherMap](https://img.shields.io/badge/OpenWeatherMap-Live-EB6E4B?style=flat-square&logo=openweathermap&logoColor=white)](https://openweathermap.org/)
 [![Visual Crossing](https://img.shields.io/badge/Visual%20Crossing-Forecast-1E88E5?style=flat-square)](https://www.visualcrossing.com/)
 [![data.gov.in](https://img.shields.io/badge/data.gov.in-Agmarknet-FF9933?style=flat-square)](https://data.gov.in/)
@@ -57,7 +57,7 @@ Weather-driven alerts · Crop disease diagnosis · Live mandi prices · Satellit
 | | |
 |---|---|
 | 🏠 **Dashboard** | Current weather, multi-day forecast, crop recommendations for the farmer's location. |
-| 🩺 **Diagnose Crop** (`/diagnose`) | Upload a photo of a diseased leaf/stem/fruit/root → disease name, severity, cause, eco-friendly + chemical remedies, and prevention tips. Runs a self-consistency ensemble (multiple passes) plus an optional independent second model for cross-checked confidence. |
+| 🩺 **Diagnose Crop** (`/diagnose`) | Upload a photo of a diseased leaf/stem/fruit/root → Gemma image analysis returns disease name, severity, cause, eco-friendly + chemical remedies, and prevention tips. Runs multiple passes for self-consistency. |
 | 🚨 **Alerts** (`/alerts`) | Day-by-day weather-driven agricultural risk alerts, a monthly risk calendar, and general seasonal advisories. |
 | 💰 **Market Prices** (`/market`) | Live government mandi (wholesale market) prices for crops by state, sourced from the official Agmarknet dataset. Filtered to real crops only — livestock/poultry, ornamental flowers, and timber entries that appear in the raw government feed are excluded. |
 | 🛰️ **Vegetation Health (NDVI)** | Satellite-derived crop health index from Sentinel-2 imagery. |
@@ -83,15 +83,15 @@ Weather-driven alerts · Crop disease diagnosis · Live mandi prices · Satellit
 
 ## 🔌 External APIs Used
 
-SmartAgro doesn't have its own database of weather, prices, or crop diseases — it calls out to these live sources:
+SmartAgro is open source under the MIT License. It uses Gemma through Google's Gemini API for AI text and image features, alongside these live data sources:
 
 | Provider | Powers | Key required? | Env var |
 |---|---|---|---|
 | **OpenWeatherMap** | Current conditions + ~5-6 day forecast | Yes (free tier) | `OPENWEATHER_API_KEY` |
 | **Visual Crossing** | Extended forecast (out to ~15 days total), feeds the Alerts monthly calendar | Yes (free tier) | `VISUALCROSSING_API_KEY` |
 | **Open-Meteo Geocoding** | Turns a typed city name into lat/lon for the chatbot | No (free, keyless) | — |
-| **Groq** | Primary chatbot model, primary crop-disease vision model, voice transcription (Whisper) | Yes (free tier) | `GROQ_API_KEY` |
-| **Google Gemini** | Fallback chat model, independent second vision model for diagnosis cross-checking, translation | Yes (free tier), optional | `GEMINI_API_KEY` |
+| **Google Gemma via Gemini API** | Chatbot, crop diagnosis (image input), recommendations, weather alerts, and translation | Yes | `GEMINI_API_KEY`, optional `GEMMA_MODEL` (default: `gemma-4-26b-a4b-it`) |
+| **Groq Whisper** | Optional voice transcription only | Yes (free tier) | `GROQ_API_KEY` |
 | **data.gov.in / Agmarknet** | Official government mandi (market) price data | Yes (free), falls back to a shared rate-limited public test key if unset | `DATA_GOV_API_KEY` |
 | **Earth Search STAC (AWS)** | Sentinel-2 satellite imagery for NDVI/vegetation health | No (free, keyless) | — |
 
@@ -123,9 +123,9 @@ sudo apt-get install -y libgdal-dev gdal-bin
 cp .env.example .env
 ```
 
-Fill in your own keys in `.env` (see the table above and the comments in `.env.example` for where to get each one for free). At minimum you need `GROQ_API_KEY` and `OPENWEATHER_API_KEY` for the app to be useful; the rest degrade gracefully but with reduced functionality if left unset.
+Fill in your own keys in `.env` (see the table above and `.env.example`). Set `GEMINI_API_KEY` for Gemma-powered AI and `OPENWEATHER_API_KEY` for current weather; optional providers degrade gracefully when unset.
 
-**Never commit your real `.env` file** — it's already in `.gitignore`.
+**Never commit your real `.env` file** — it is ignored by `.gitignore`.
 
 ### 3. Run locally
 
@@ -166,7 +166,6 @@ Smartagro-Main/
 ├── Dockerfile                  # HF Spaces / Docker deployment
 ├── .env.example                # Environment variable template (copy to .env)
 ├── market_history_cache.json   # Persisted market price history (auto-updated)
-├── api_usage_tracker.json      # Persisted API call counters
 ├── templates/
 │   ├── index.html              # Dashboard
 │   ├── diagnose.html           # Crop disease diagnosis page

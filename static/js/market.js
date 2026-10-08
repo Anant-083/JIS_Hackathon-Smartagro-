@@ -212,6 +212,16 @@ async function loadAllMarkets() {
         const liveCount = data.live_count || 0;
         console.log(`[Market] Live commodities: ${liveCount} | Cities with no live data: ${emptyCities.length}`);
 
+        const cacheNote = document.getElementById('marketCacheNote');
+        if (cacheNote && data.cached_data && data.cached_updated_on) {
+            const updatedOn = new Date(`${data.cached_updated_on}T00:00:00`).toLocaleDateString();
+            cacheNote.textContent = `Showing last saved prices, updated on ${updatedOn}`;
+            cacheNote.style.display = '';
+        } else if (cacheNote) {
+            cacheNote.textContent = '';
+            cacheNote.style.display = 'none';
+        }
+
         updateDataSourceBadge(liveCount, emptyCities);
 
         hideLoading();

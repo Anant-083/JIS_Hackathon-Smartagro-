@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 import logging
 import uuid
+from google import genai
+from google.genai import types
 
 # ── Windows fix: force IPv4 for outbound requests ───────────────────────────
 # If a browser reaches a URL instantly but Python's `requests` times out on 
@@ -30,8 +32,17 @@ import hashlib
 import difflib
 import threading
 import concurrent.futures
+import traceback
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+
+# ── Structured logging ───────────────────────────────────────────────────────
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("smartagro")
 
 # ── Optional heavy deps for Sentinel-2 NDVI ─────────────────────────────────
 try:
@@ -46,6 +57,7 @@ except ImportError:
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 load_dotenv(os.path.join(basedir, '.env'))
+
 
 app = Flask(__name__)
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -64,15 +76,6 @@ app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024  # 12 MB
 @app.errorhandler(413)
 def _request_too_large(e):
     return jsonify({"error": "Request body too large."}), 413
-
-# ── Structured logging ───────────────────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("smartagro")
-
 
 # ── Bounded in-memory cache helper ──────────────────────────────────────────
 # Several endpoints keep small in-memory dicts (translation results, weather,
@@ -148,14 +151,37 @@ def _add_static_cache_headers(response):
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
 VISUALCROSSING_API_KEY = os.getenv("VISUALCROSSING_API_KEY", "")  # extended forecast, days beyond OpenWeather's free ~5-6 day window
-GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
+GEMMA_MODEL          = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+GROQ_API_KEY         = os.getenv("GROQ_API_KEY", "")  # retained only for Whisper speech transcription
+_gemma_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 NINJA_API_KEY       = os.getenv("NINJA_API_KEY", "")  # no longer used by /api/market (kept for backward-compat only)
 DEBUG_MODE          = os.getenv("FLASK_DEBUG", "0") == "1"
 
-# Gemini is used as a genuinely INDEPENDENT second vision model in the crop
-# diagnosis ensemble. Only active when GEMINI_API_KEY is set in .env.
-GEMINI_DIAGNOSIS_MODEL = os.getenv("GEMINI_DIAGNOSIS_MODEL", "gemini-3.1-flash-lite")
+def _gemma_generate(contents, system_instruction=None, temperature=0.5,
+                    max_output_tokens=1024, response_mime_type=None,
+                    thinking_level=None):
+    """Call the configured Gemma model. Return response text or raise to caller fallback."""
+    if _gemma_client is None:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        response_mime_type=response_mime_type,
+        thinking_config=(types.ThinkingConfig(thinking_level=thinking_level)
+                         if thinking_level else None),
+    )
+    response = _gemma_client.models.generate_content(
+        model=GEMMA_MODEL, contents=contents, config=config
+    )
+    text = (response.text or "").strip()
+    if not text:
+        finish_reason = ", ".join(str(c.finish_reason) for c in (response.candidates or [])) or "none"
+        raise RuntimeError(
+            f"Gemma returned no user-visible text (model={GEMMA_MODEL}, finish_reason={finish_reason})"
+        )
+    return text
 
 # ── Per-feature usage analytics ─────────────────────────────────────────────
 # Tracks how often each SmartAgro feature is used (page views + API calls) as
@@ -285,9 +311,9 @@ LANG_NAMES = {
     "bodo":"Bodo","doi":"Dogri","sa":"Sanskrit",
 }
 
-logger.info(f"[AgroSmart] Groq key: {'OK (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else 'MISSING'}")
+logger.info(f"[AgroSmart] Gemini API key: {'configured' if GEMINI_API_KEY else 'missing'} | Gemma model: {GEMMA_MODEL}")
 logger.info(f"[AgroSmart] Weather key: {'OK' if OPENWEATHER_API_KEY else 'MISSING'}")
-logger.info(f"[AgroSmart] Ninja key: {'OK (' + NINJA_API_KEY[:8] + '...)' if NINJA_API_KEY else 'MISSING'}")
+logger.info(f"[AgroSmart] Ninja key: {'configured' if NINJA_API_KEY else 'missing'}")
 logger.info(f"[AgroSmart] Sentinel-2 NDVI: {'ENABLED (rasterio available)' if _RASTERIO_AVAILABLE else 'DISABLED (install rasterio)'}")
 
 
@@ -503,9 +529,8 @@ def healthz():
 def readyz():
     return jsonify({
         "status":      "ok",
-        "groq":        bool(GROQ_API_KEY),
+        "gemma":       bool(GEMINI_API_KEY),
         "openweather": bool(OPENWEATHER_API_KEY),
-        "gemini":      bool(GEMINI_API_KEY),
         "ndvi":        _RASTERIO_AVAILABLE,
     }), 200
 
@@ -805,8 +830,8 @@ CROP_AI_CACHE_TTL_SEC = 3 * 60 * 60  # 3 hours — same city/season/weather buck
 
 
 def ai_recommend_crops(city, lat, lon, temp, humidity, rain, season):
-    """Ask Groq for crops genuinely suited to THIS location's climate, soil region and season. Returns None on any failure so the caller can fall back to rule-based recommend_crops() and the dashboard never breaks."""
-    if not GROQ_API_KEY:
+    """Ask Gemma for crops suited to this location; return None for rule-based fallback."""
+    if not GEMINI_API_KEY:
         return None
 
     cache_key = f"{city}|{round((lat or 0), 1)}|{round((lon or 0), 1)}|{season}|{round(temp/3)*3}|{round(humidity/10)*10}"
@@ -817,21 +842,9 @@ def ai_recommend_crops(city, lat, lon, temp, humidity, rain, season):
 
     prompt = f"""You are an expert Indian agronomist advising a farmer in India. Location / Place: {city or "an unspecified Indian region"} (approx. lat {lat}, lon {lon}) Current season: {season} Current live weather right now: {temp} deg C, {humidity}% humidity, {rain} mm recent rainfall CRITICAL INSTRUCTION: You MUST recommend EXACTLY 6 DIFFERENT crops best suited to THIS exact location's climate, soil region, and live weather. Do NOT return only 1 or 2 crops! Do NOT recommend tobacco, opium poppy, cannabis/hemp, or any other controlled, licensed-only, or health-sensitive crop, even if agronomically suited to the region — this app only recommends common food, cash, and commercial crops a general farmer can grow without special government licensing. Use your knowledge of Indian agro-climatic zones (e.g. black cotton soil across Maharashtra/Deccan, alluvial soil in the Indo-Gangetic plain, laterite soil along coastal belts, arid/sandy soil in Rajasthan, red soil in South India, etc.) to pick 6 realistic, regionally-appropriate crops, ordered from best to weakest fit for THIS location. ACCURACY RULES — read carefully: - Every field below must be YOUR OWN genuine analysis for each specific crop at this specific location and weather. Do not reuse the same numbers across crops, and do not default to round or "typical-looking" numbers — compute each field based on that crop's real agronomic profile. - "match": your own honest 0-100% suitability score for THIS crop at THIS location/weather/season, decreasing from crop 1 (best fit) to crop 6 (weakest of your 6 picks). Two different crops should essentially never share the same score by coincidence. - "yield", "profit", "duration", "fertilizer": use realistic figures specific to that crop's real agronomy — these vary a lot crop to crop (e.g. sugarcane duration is far longer than tomato; rice fertilizer needs differ from mustard's) so do not copy generic filler ranges. - "location_suitability" and "weather_suitability" must each cite the ACTUAL current numbers given above (this location's real soil/region, and the real {temp}°C / {humidity}% figures), not generic language. Respond ONLY with a JSON object, no preamble, no markdown fences, matching exactly this shape (values below are placeholders showing the expected TYPE/FORMAT only — replace every one with your own real analysis): {{ "crops": [ {{ "name": "<crop name>", "icon": "<one relevant emoji>", "match": "<your computed 0-100 suitability score>%", "description": "<short explanation of why it suits this location & weather>", "location_suitability": "<specific reason tied to {city or 'this place'}'s real soil & region>", "weather_suitability": "<specific reason tied to the real current {temp}°C temp & {humidity}% humidity>", "season": "Kharif (Monsoon) | Rabi (Winter) | Zaid (Summer)", "water": "High | Medium | Low", "yield": "<realistic yield range for this crop, e.g. 'X-Y tonnes/ha'>", "profit": "<realistic profit range for this crop, e.g. 'Rs X,000-Y,000/ha'>", "duration": "<this crop's real growth duration, e.g. 'X-Y days'>", "soil": "<this crop's actual preferred soil type>", "fertilizer": "<this crop's actual real NPK recommendation, e.g. 'NPK X:Y:Z kg/ha'>" }} ] }} The "crops" array must contain exactly 6 such objects, each for a different crop, each independently reasoned."""
 
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model":       "openai/gpt-oss-20b",
-        "messages":    [{"role": "user", "content": prompt}],
-        "temperature": 0.4,
-        "max_tokens":  3500,
-        "response_format": {"type": "json_object"}
-    }
     try:
-        resp = _post_to_groq(body, headers)
-        if resp is None or resp.status_code != 200:
-            err_text = resp.text if resp else "no-response"
-            logger.info(f"[CropAI] Groq HTTP {getattr(resp, 'status_code', 'None')} for {city} | {err_text}")
-            return None
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        raw = _gemma_generate(prompt, temperature=0.4, max_output_tokens=3500,
+                              response_mime_type="application/json")
         # Remove reasoning block if model is a thinking model
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
@@ -1038,7 +1051,8 @@ _agmark_session.headers.update({
                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 })
 _agmark_retry = requests.adapters.Retry(
-    total=2, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504]
+    total=1, connect=1, read=1, status=1, backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504]
 )
 _agmark_session.mount("https://", requests.adapters.HTTPAdapter(max_retries=_agmark_retry))
 
@@ -1272,7 +1286,7 @@ def fetch_agmarknet_prices(state: str) -> list:
             "filters[state]": candidate,
         }
         try:
-            resp = _agmark_session.get(AGMARKNET_URL, params=params, timeout=15)
+            resp = _agmark_session.get(AGMARKNET_URL, params=params, timeout=5)
             if resp.status_code == 429:
                 logger.info(f"[Market] Agmarknet HTTP 429 Rate Limit for state='{candidate}'")
                 continue
@@ -1526,6 +1540,36 @@ def get_market_data():
                         logger.warning(f"[Market] Unexpected error fetching {state}: {e}")
                         state_results_cache[state] = []
 
+        # If the live feed fails or has no usable rows for a state, use the
+        # latest genuine observations already persisted for that state.
+        cached_data_used = False
+        cached_dates = []
+        history_cache = _load_history_cache()
+        for state in unique_states:
+            if state_results_cache.get(state):
+                continue
+            cached_rows = []
+            for crop, history in history_cache.get(state, {}).items():
+                valid_points = [p for p in history if p.get("date") and p.get("price") is not None]
+                if not valid_points:
+                    continue
+                valid_points.sort(key=lambda p: p["date"])
+                latest = valid_points[-1]
+                previous = valid_points[-2] if len(valid_points) > 1 else None
+                price = float(latest["price"])
+                previous_price = float(previous["price"]) if previous else price
+                change = round(((price - previous_price) / previous_price) * 100, 2) if previous_price else 0.0
+                cached_rows.append({
+                    "crop": crop, "crop_key": crop, "price": int(round(price)),
+                    "change": change, "history": [float(p["price"]) for p in valid_points],
+                    "unit": "Rs/quintal", "source": "agmarknet_cache",
+                    "market": "", "district": "", "arrival_date": latest["date"],
+                })
+                cached_dates.append(latest["date"])
+            if cached_rows:
+                state_results_cache[state] = cached_rows
+                cached_data_used = True
+
         for city in cities:
             state = CITY_STATE.get(city, "")
             try:
@@ -1560,6 +1604,8 @@ def get_market_data():
             "empty_cities": empty_cities,
             "fetched_at":   datetime.now().isoformat(),
             "data_source":  "Agmarknet — Ministry of Agriculture & Farmers Welfare, Govt. of India (data.gov.in)",
+            "cached_data":  cached_data_used,
+            "cached_updated_on": max(cached_dates) if cached_dates else None,
         })
 
     except Exception as e:
@@ -1608,10 +1654,10 @@ def debug_market():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ─── Chatbot fallback (Groq down/erroring) ──────────────────────────────────
+# ─── Chatbot fallback (Gemma unavailable/erroring) ──────────────────────────
 # The frontend displays whatever string comes back here directly as the
 # bot's own chat bubble, so this needs to read as a real, helpful sentence —
-# not a raw error code — and in the farmer's own language, since Groq being
+# not a raw error code — and in the farmer's own language, since Gemma being
 # down also means we can't call it to translate this message on the fly.
 _CHAT_FALLBACK_MSG = {
     "en": "Sorry, I'm having trouble connecting right now. Please try again in a moment.",
@@ -1629,7 +1675,7 @@ _CHAT_FALLBACK_MSG = {
 
 
 def _chat_fallback_reply(messages, lang):
-    """Friendly, localized reply for when Groq itself is unreachable/erroring. Adds a simple keyword-based pointer to a relevant app section so the farmer still gets *something* useful instead of a dead end."""
+    """Friendly localized reply for model failures, with a relevant app section pointer."""
     base = _CHAT_FALLBACK_MSG.get(lang, _CHAT_FALLBACK_MSG["en"])
 
     last_user_msg = ""
@@ -1650,37 +1696,19 @@ def _chat_fallback_reply(messages, lang):
     return base + suggestion
 
 
-def _gemini_chat_reply(system_prompt, messages):
-    """Fallback for the chatbot when Groq fails — sends the exact same system prompt and conversation to Gemini instead, so the farmer gets a real, context-aware answer rather than a canned apology. Returns None (not raises) on any failure, so the caller can fall through to the final localized fallback message."""
-    if not GEMINI_API_KEY:
+def _gemma_chat_reply(system_prompt, messages):
+    """Generate a chatbot reply with Gemma; return None so the localized fallback can run."""
+    contents = []
+    for message in messages:
+        role = "model" if message.get("role") == "assistant" else "user"
+        content = (message.get("content") or "").strip()
+        if content:
+            contents.append({"role": role, "parts": [{"text": content}]})
+    if not contents:
         return None
-    try:
-        gemini_contents = []
-        for m in messages:
-            role = "model" if m.get("role") == "assistant" else "user"
-            content = (m.get("content") or "").strip()
-            if content:
-                gemini_contents.append({"role": role, "parts": [{"text": content}]})
-        if not gemini_contents:
-            return None
-
-        body = {
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "contents": gemini_contents,
-            "generationConfig": {"temperature": 0.5, "maxOutputTokens": 700},
-        }
-        resp = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
-            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-            json=body, timeout=30
-        )
-        if resp.status_code == 200:
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return text or None
-        logger.info(f"[Chat] Gemini fallback returned {resp.status_code}: {resp.text[:300]}")
-    except Exception as e:
-        logger.warning(f"[Chat] Gemini fallback exception: {e}")
-    return None
+    return _gemma_generate(contents, system_instruction=system_prompt,
+                           temperature=0.5, max_output_tokens=700,
+                           thinking_level="minimal") or None
 
 
 # ─── Chatbot topic gate ──────────────────────────────────────────────────────
@@ -1688,7 +1716,7 @@ def _gemini_chat_reply(system_prompt, messages):
 # questions, but prompt instructions alone aren't 100% reliable for LLMs —
 # same reasoning as the restricted-crops hard intercept above. This adds a
 # real pre-filter: obviously off-topic messages (movies, coding help,
-# politics, general chit-chat unrelated to farming) never reach Groq at
+# politics, general chit-chat unrelated to farming) never reach Gemma at
 # all, so the app can't be steered into acting as a general-purpose
 # chatbot in front of an audience.
 def _compile_word_matchers(words):
@@ -1730,8 +1758,8 @@ def _chat_message_on_topic(text: str) -> bool:
 
 
 # Pre-canned polite refusals (localized) for the off-topic case, so we don't
-# spend a Groq call just to say no, and it reads naturally in the farmer's
-# own language even if Groq/Gemini are both down.
+# spend a model call just to say no, and it reads naturally in the farmer's
+# own language even if the Gemma API is down.
 _OFF_TOPIC_REPLIES = {
     "en": "I'm Kisan Helper — I can only help with farming, crops, weather, market prices, and government schemes. Ask me something about your farm and I'll do my best to help!",
     "hi": "मैं किसान हेल्पर हूं — मैं केवल खेती, फसल, मौसम, मंडी भाव और सरकारी योजनाओं में मदद कर सकता हूं। अपने खेत के बारे में कुछ पूछें, मैं मदद करूंगा!",
@@ -2095,8 +2123,6 @@ def _chat_run_gateway(intents, context_data, message_text=""):
 
 @app.route("/api/chat", methods=["POST"])
 def kisan_chat():
-    model = "openai/gpt-oss-120b"   # replaces deprecated llama-3.3-70b-versatile (shut down 08/16/26)
-
     ip = request.remote_addr or "unknown"
     if _is_rate_limited_chat(ip):
         return jsonify({"error": "Too many requests. Please wait a moment."}), 429
@@ -2111,7 +2137,7 @@ def kisan_chat():
 
     # ── Hard intercept for restricted crops ──────────────────────────────────
     # Prompt instructions alone aren't 100% reliable for LLMs, especially
-    # live in front of an audience — this check runs BEFORE calling Groq at
+    # live in front of an audience — this check runs BEFORE calling Gemma at
     # all, so the app can never accidentally give cultivation advice for a
     # controlled/licensed-only crop, regardless of how the AI would have
     # responded.
@@ -2129,7 +2155,7 @@ def kisan_chat():
         return jsonify({"reply": _RESTRICTED_REPLY.get(lang, _RESTRICTED_REPLY["en"])})
 
     # ── Hard topic gate ────────────────────────────────────────────────────
-    # Runs before any Groq/Gemini call, same reasoning as the restricted-crop
+    # Runs before any Gemma call, same reasoning as the restricted-crop
     # intercept above: a keyword-only check the model can't be talked around.
     if not _chat_message_on_topic(last_user_msg):
         return jsonify({"reply": _off_topic_reply(lang)})
@@ -2180,42 +2206,23 @@ def kisan_chat():
 
     system_prompt = f"""You are Kisan Helper, a smart AI assistant for Indian farmers in the SmartAgro app. Answer ONLY: Agriculture, Crops, Soil, Pest Control, Fertilizers, Irrigation, Water Management, Govt schemes (PM-KISAN, PMFBY, KCC), SmartAgro app features. For anything unrelated, politely refuse in {lang_name}. Answer in {lang_name} (native script). Be SHORT and COMPLETE: max 4-5 bullet points or 3 sentences. Never leave an answer unfinished. App Navigation: If the user asks about checking features, provide direct Markdown links to navigate there. Use EXACTLY these formats: • Dashboard/Home/Location: [Dashboard](/) • Crop Health/Disease/Upload Photo: [Diagnose Crop](/diagnose) • Market Prices/Mandi: [Market Prices](/market) • Weather Alerts/Forecast: [Alerts](/alerts). No markdown headers (#, ##). No asterisks for bullets, use • instead. FORMATTING: Never use a hyphen or dash character (-, –, —) anywhere in your reply, not as a bullet marker, not inside or between words, and not to join a sentence. Where you would normally use a dash to join a thought, use a period, comma, or the word "and" instead. Write compound words as either one word or two separate words instead of hyphenating them.{location_block} SOIL KNOWLEDGE: You know about soil types (clay, loamy, sandy, silt, black, red, alluvial, laterite), pH levels, nutrients (NPK), organic matter, soil testing, and which crops suit which soil. APP SECTION RULES, only suggest a section when it is DIRECTLY relevant: • Suggest [Diagnose Crop](/diagnose) ONLY if the user asks about crop disease, leaf spots, pest infestation, plant infection, or crop health problems. • Suggest [Market Prices](/market) ONLY if the user asks about mandi rates, selling price, MSP, commodity prices, or where to sell crops. • Suggest [Dashboard](/) ONLY if the user asks about weather forecast, rain, temperature, or local weather conditions. • Suggest [Alerts](/alerts) ONLY if the user asks about severe weather warnings, flood, frost, storm, or pest outbreak warnings. • Mention the Helpline (1800 180 1551, bottom left button) ONLY if the user needs expert phone support. • For general farming questions (how to grow, fertilizer, irrigation, soil, seasons), answer directly WITHOUT suggesting any app section unless it truly helps. LOCATION ANSWERS: If the farmer asks what to grow, is this good weather, or questions about their location, use the FARMER'S CURRENT LOCATION & WEATHER data above to give a specific, direct answer. RESTRICTED CROPS: Never give cultivation advice, growing steps, or encouragement for tobacco, opium poppy, cannabis/hemp, or other controlled/licensed only crops, even if agronomically asked about or technically legal with a special government license. If asked, briefly note that this app focuses on common food and commercial crops and doesn't advise on licensed/controlled crops, then offer to help with a suitable alternative crop for their location instead."""
 
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model":       model,
-        "messages":    [{"role": "system", "content": system_prompt}] + messages,
-        "temperature": 0.5,
-        "max_tokens":  700,
-        "stream":      False
-    }
     try:
-        resp = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=body, timeout=30)
-        if resp.status_code == 200:
-            res_json = resp.json()
-            reply = res_json["choices"][0]["message"]["content"].strip()
-            if gateway_summaries:
-                reply += "\n\n" + "\n".join(gateway_summaries)
-            return jsonify({"reply": reply})
-
-        # Groq unavailable (rate-limited, model error, etc.) — try Gemini
-        # with the exact same prompt/context before giving up, so the
-        # farmer gets a real answer instead of a canned message whenever
-        # possible.
-        logger.info(f"[Chat] Groq returned {resp.status_code}, trying Gemini fallback")
-        gemini_reply = _gemini_chat_reply(system_prompt, messages)
-        if gemini_reply:
-            if gateway_summaries:
-                gemini_reply += "\n\n" + "\n".join(gateway_summaries)
-            return jsonify({"reply": gemini_reply})
-
-        return jsonify({"error": _chat_fallback_reply(messages, lang)}), 500
-    except Exception as e:
-        logger.warning(f"[Chat error] {e} — trying Gemini fallback")
-        gemini_reply = _gemini_chat_reply(system_prompt, messages)
-        if gemini_reply:
-            if gateway_summaries:
-                gemini_reply += "\n\n" + "\n".join(gateway_summaries)
-            return jsonify({"reply": gemini_reply})
+        reply = _gemma_chat_reply(system_prompt, messages)
+        if not reply:
+            raise RuntimeError(f"Gemma returned an empty reply (model={GEMMA_MODEL})")
+        if gateway_summaries:
+            reply += "\n\n" + "\n".join(gateway_summaries)
+        return jsonify({"reply": reply})
+    except Exception:
+        # Log the complete failure for diagnosis, but scrub configured keys
+        # and common token formats before anything reaches the terminal.
+        details = traceback.format_exc()
+        for name, value in globals().items():
+            if name.endswith("_API_KEY") and isinstance(value, str) and value:
+                details = details.replace(value, "[REDACTED API KEY]")
+        details = re.sub(r"AIza[0-9A-Za-z_-]{15,}", "[REDACTED GOOGLE KEY]", details)
+        details = re.sub(r"gsk_[0-9A-Za-z]{12,}", "[REDACTED GROQ KEY]", details)
+        logger.error("[Chat] Gemma failed; returning localized fallback:\n%s", details)
         return jsonify({"error": _chat_fallback_reply(messages, lang)}), 500
 
 
@@ -2226,7 +2233,7 @@ MAX_AUDIO_B64_LEN = 8 * 1024 * 1024  # ~6 MB raw audio
 @app.route("/api/stt", methods=["POST"])
 def speech_to_text():
     if not GROQ_API_KEY:
-        return jsonify({"error": "GROQ_API_KEY not set in .env"}), 500
+        return jsonify({"error": "GROQ_API_KEY not set in environment (voice transcription only)"}), 500
 
     ip = request.remote_addr or "unknown"
     if _is_rate_limited_stt(ip):
@@ -2312,49 +2319,21 @@ def _is_rate_limited_diagnose(ip: str) -> bool:
     return not _rate_limit("diagnose", ip, DIAGNOSE_LIMIT)
 
 
-# ─── Diagnose Crop via ensemble (Groq + Gemini) ───────────────────────────────
+# ─── Diagnose Crop via Gemma vision ensemble ─────────────────────────────────
 MAX_IMAGE_B64_LEN = 14 * 1024 * 1024  # ~10 MB raw image
 
-# Vision-capable models tried per ensemble pass. Today Groq only has one
-# production-viable multimodal model on the general tier — meta-llama/llama-4-
-# scout-17b-16e-instruct was deprecated June 17, 2026. Add a second entry here
-# as soon as one exists; no other code needs to change.
-vision_models = [
-    "qwen/qwen3.6-27b",
-]
-
-
 def ai_is_crop_image(image_b64):
-    """Fast, low-token sanity check BEFORE running the full diagnosis prompt: does this photo actually show a plant/crop part? Without this, the main prompt will happily hallucinate a plausible-sounding disease name for a photo of a hand, a sack of grain, or a selfie — which is worse than useless for a farmer trying to protect a crop. Fails OPEN (assumes "yes, it's a plant") on any error/timeout/missing key, so a flaky classifier call never blocks a genuine diagnosis. Returns (is_plant: bool, reason: str | None)."""
-    if not GROQ_API_KEY:
+    """Check that an uploaded image shows plant material; fail open on model errors."""
+    if not GEMINI_API_KEY:
         return True, None
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model": vision_models[0],
-        "messages": [
-            {"role": "system", "content": "You classify images. Return ONLY valid JSON, nothing else."},
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                {"type": "text", "text": (
-                    "Does this image show a plant, crop, leaf, stem, fruit, root, or "
-                    "other plant/agricultural material (even if diseased, damaged, or "
-                    "unclear)? Respond with ONLY this JSON: "
-                    '{"is_plant": true or false, "reason": "very short reason if false"}'
-                )},
-            ]}
-        ],
-        "temperature": 0.0,
-        "max_tokens": 100,
-        "response_format": {"type": "json_object"},
-    }
     try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers, json=body, timeout=8,
+        image = types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg")
+        raw = _gemma_generate(
+            [image, "Does this image show a plant, crop, leaf, stem, fruit, root, or other plant/agricultural material (even if diseased, damaged, or unclear)? Respond with ONLY this JSON: {\"is_plant\": true or false, \"reason\": \"very short reason if false\"}"],
+            system_instruction="You classify images. Return ONLY valid JSON, nothing else.",
+            temperature=0.0, max_output_tokens=100,
+            response_mime_type="application/json",
         )
-        if resp.status_code != 200:
-            return True, None
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
         parsed = _extract_json_object(raw)
         if not parsed or "is_plant" not in parsed:
             return True, None
@@ -2362,72 +2341,21 @@ def ai_is_crop_image(image_b64):
             return False, parsed.get("reason") or "The photo doesn't appear to show a plant or crop."
         return True, None
     except Exception as e:
-        logger.warning(f"[Diagnose] ai_is_crop_image check failed (failing open): {e}")
+        logger.warning(f"[Diagnose] Gemma image check failed (failing open): {e}")
         return True, None
 
 
 def _run_vision_pass(image_b64, prompt, sys_prompt, model, temperature):
-    """Run one diagnosis pass against one Groq vision model and return parsed JSON, or None if that pass failed."""
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                {"type": "text", "text": prompt}
-            ]}
-        ],
-        "temperature": temperature,
-        "max_tokens": 1400,
-        "reasoning_effort": "none",
-    }
-    resp = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                          headers=headers, json=body, timeout=45)
-    if resp.status_code != 200:
-        return None
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    """Run one Gemma image diagnosis pass and return parsed JSON, or None on failure."""
+    image = types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type="image/jpeg")
+    raw = _gemma_generate(
+        [image, prompt], system_instruction=sys_prompt,
+        temperature=temperature, max_output_tokens=1400,
+        response_mime_type="application/json",
+    )
     cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        return None
-    return json.loads(match.group())
-
-
-def _run_gemini_pass(image_b64, prompt, sys_prompt):
-    """Run one diagnosis pass against Google's Gemini API and return parsed JSON, or None on any failure. When GEMINI_API_KEY is configured this gives the ensemble a genuinely INDEPENDENT second model (different vendor, different weights) so an agreement between Groq & Gemini is real cross-model evidence."""
-    if not GEMINI_API_KEY:
-        return None
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_DIAGNOSIS_MODEL}:generateContent")
-    body = {
-        "system_instruction": {"parts": [{"text": sys_prompt}]},
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
-                {"text": prompt},
-            ],
-        }],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 3000,
-                             "responseMimeType": "application/json"},
-    }
-    try:
-        resp = requests.post(url, headers={"Content-Type": "application/json",
-                            "x-goog-api-key": GEMINI_API_KEY}, json=body, timeout=45)
-        if resp.status_code != 200:
-            logger.warning(f"[Diagnose] Gemini HTTP {resp.status_code}: {resp.text[:200]}")
-            return None
-        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            return None
-        return json.loads(match.group())
-    except Exception as e:
-        logger.warning(f"[Diagnose] Gemini exception: {e}")
-        return None
-
+    return json.loads(match.group()) if match else None
 
 def _diseases_agree(name_a, name_b):
     """Fuzzy-match two disease name strings so small phrasing differences between passes still count as agreement, while genuinely different diagnoses are correctly flagged as a disagreement."""
@@ -2468,8 +2396,8 @@ def _log_diagnosis(record):
 
 @app.route("/api/diagnose", methods=["POST"])
 def diagnose_crop():
-    if not GROQ_API_KEY:
-        return jsonify({"error": "GROQ_API_KEY not set in .env"}), 500
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "GEMINI_API_KEY not set in environment"}), 500
 
     ip = request.remote_addr or "unknown"
     if _is_rate_limited_diagnose(ip):
@@ -2521,24 +2449,14 @@ def diagnose_crop():
         sys_prompt += f" All free-text values must be in {lang_name}."
 
     # ── Step 2: ensemble / self-consistency passes ──────────────────────
-    # With a single Groq vision model configured (today's reality) this runs
-    # that model twice at different temperatures as a self-consistency
-    # cross-check. When a Gemini key is configured, a genuinely INDEPENDENT
-    # second model is appended to the ensemble — so an agreement between
-    # Groq & Gemini is real cross-model evidence.
+    # Repeat Gemma at different temperatures for a self-consistency cross-check.
     pass_temperatures = [0.2, 0.6, 0.9]
-    pass_plan = [
-        (i, vision_models[i % len(vision_models)], pass_temperatures[i % len(pass_temperatures)])
-        for i in range(ENSEMBLE_PASSES)
-    ]
-    if GEMINI_API_KEY:
-        pass_plan.append((len(pass_plan), "gemini", 0.3))
+    pass_plan = [(i, GEMMA_MODEL, pass_temperatures[i % len(pass_temperatures)])
+                 for i in range(ENSEMBLE_PASSES)]
     pass_outcomes = [None] * len(pass_plan)
 
     def _run_pass(i, model, temp):
         try:
-            if model == "gemini":
-                return _run_gemini_pass(image_b64, prompt, sys_prompt)
             return _run_vision_pass(image_b64, prompt, sys_prompt, model, temp)
         except Exception as e:
             logger.warning(f"[Diagnose] pass {i} ({model}) failed: {e}")
@@ -2556,17 +2474,14 @@ def diagnose_crop():
                 pass_outcomes[i] = (parsed, model)
 
     results, models_used = [], []
-    gemini_display = f"gemini:{GEMINI_DIAGNOSIS_MODEL}"
     for outcome in pass_outcomes:
         if outcome is not None:
             parsed, model = outcome
             results.append(parsed)
-            models_used.append(gemini_display if model == "gemini" else model)
+            models_used.append(model)
 
     if not results:
-        if not GEMINI_API_KEY:
-            return jsonify({"error": "GEMINI_API_KEY not set in .env"}), 500
-        return jsonify({"error": "All vision models failed. Check your GROQ_API_KEY in .env"}), 500
+        return jsonify({"error": "Gemma could not analyze this image. Please try again."}), 502
 
     # ── Step 3: merge / vote across passes ───────────────────────────────
     primary = max(results, key=lambda r: r.get("confidence", 0))
@@ -2820,14 +2735,14 @@ def _compute_alerts_for_conditions(temp, humidity, wind_speed, rain, description
     return alerts
 
 
-# ─── AI-Enhanced Alerts via Groq ─────────────────────────────────────────────
+# ─── AI-Enhanced Alerts via Gemma ────────────────────────────────────────────
 _ai_alerts_cache = {}
 AI_ALERTS_CACHE_TTL_SEC = 3 * 60 * 60  # 3 hours
 
 
 def _ai_alerts_for_today(city, lat, lon, temp, humidity, wind_speed, rain, description):
-    """Ask Groq for location-specific, weather-aware alerts for today."""
-    if not GROQ_API_KEY:
+    """Ask Gemma for location-specific, weather-aware alerts for today."""
+    if not GEMINI_API_KEY:
         return None
 
     cache_key = f"today|{city}|{round(lat or 0, 1)}|{round(lon or 0, 1)}|{round(temp/3)*3}|{round(humidity/10)*10}"
@@ -2838,23 +2753,9 @@ def _ai_alerts_for_today(city, lat, lon, temp, humidity, wind_speed, rain, descr
 
     prompt = f"""You are an expert agricultural meteorologist for India. Location: {city or 'Unknown'} (lat {lat}, lon {lon}) Today's weather: {temp}°C, {humidity}% humidity, wind {wind_speed} m/s, {rain} mm rain, {description} Generate 3–6 specific, actionable agricultural alerts for a farmer at this location based on TODAY's weather conditions. Each alert must be SPECIFIC to these exact conditions — do not produce generic alerts. Categories: Weather, Pest, Disease, Crop Advisory Types: danger (life/crop threatening), warning (needs attention), info (advisory) Respond ONLY with a JSON object, no markdown, no backticks: {{ "alerts": [ {{ "type": "danger|warning|info", "category": "Weather|Pest|Disease|Crop Advisory", "icon": "one emoji", "title": "Short alert title", "message": "Detailed description of the risk (1-2 sentences)", "action": "Specific action the farmer should take (1-2 sentences)" }} ] }}"""
 
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model":       "openai/gpt-oss-20b",
-        "messages":    [{"role": "user", "content": prompt}],
-        "temperature": 0.4,
-        "max_tokens":  3500,
-        "response_format": {"type": "json_object"}
-    }
     try:
-        resp = _post_to_groq(body, headers)
-        if resp is None or resp.status_code != 200:
-            err_text = resp.text if resp else "no-response"
-            logger.info(f"[AlertsAI] Groq HTTP {getattr(resp, 'status_code', 'None')} for today/{city} | {err_text}")
-            return None
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        # Remove reasoning block if model is a thinking model
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        raw = _gemma_generate(prompt, temperature=0.5, max_output_tokens=3500,
+                              response_mime_type="application/json")
         cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         try:
@@ -2880,8 +2781,8 @@ def _ai_alerts_for_today(city, lat, lon, temp, humidity, wind_speed, rain, descr
 
 
 def _ai_alerts_for_forecast(city, lat, lon, forecast_days):
-    """Ask Groq for location-specific alerts for ALL forecast days in a single prompt."""
-    if not GROQ_API_KEY or not forecast_days:
+    """Ask Gemma for location-specific alerts for ALL forecast days in a single prompt."""
+    if not GEMINI_API_KEY or not forecast_days:
         return None
 
     days_summary = "\n".join([
@@ -2898,23 +2799,9 @@ def _ai_alerts_for_forecast(city, lat, lon, forecast_days):
 
     prompt = f"""You are an agricultural officer for {city or 'India'}. Analyze this {len(forecast_days)}-day weather forecast for local farmers: {days_summary} Provide specific, realistic agricultural alerts tailored to EACH day's exact weather. You MUST generate custom alerts for EVERY SINGLE DATE listed above. Do NOT repeat the exact same alert across multiple days. Respond ONLY with valid JSON: {{ "days": [ {{ "date": "YYYY-MM-DD", "alerts": [ {{ "type": "danger|warning|info", "category": "Weather|Pest|Disease|Crop Advisory", "icon": "relevant emoji", "title": "Clear, specific alert title", "message": "Scientific yet practical advisory for this day's weather", "action": "Actionable farmer recommendation with exact chemical/organic dose if applicable" }} ] }} ] }}"""
 
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model":       "openai/gpt-oss-20b",
-        "messages":    [{"role": "user", "content": prompt}],
-        "temperature": 0.5,
-        "max_tokens":  7000,
-        "response_format": {"type": "json_object"}
-    }
     try:
-        resp = _post_to_groq(body, headers)
-        if resp is None or resp.status_code != 200:
-            err_text = resp.text if resp else "no-response"
-            logger.info(f"[AlertsAI] Groq HTTP {getattr(resp, 'status_code', 'None')} for forecast/{city} | {err_text}")
-            return None
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        # Remove reasoning block if model is a thinking model
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        raw = _gemma_generate(prompt, temperature=0.5, max_output_tokens=7000,
+                              response_mime_type="application/json")
         cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         try:
@@ -3144,57 +3031,9 @@ def crop_risk():
 
     return jsonify({"crops": results})
 
-GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
-TRANSLATE_MODELS = [
-    "openai/gpt-oss-120b",   # primary: fast & multilingual
-    "openai/gpt-oss-20b",    # fallback 1: very fast, lightweight
-    "qwen/qwen3.6-27b",      # fallback 2: genuinely different model, not just a repeat of primary
-]
-TRANSLATE_CHUNK_SIZE = 40   
-TRANSLATE_MAX_WORKERS = 4  
-TRANSLATE_STAGGER_SEC = 0.15 
-# NOTE: this used to be 1.5s. With 4 worker threads all calling the SAME
-# model, a 1.5s minimum gap between calls forces them back into near-serial
-# execution (4 chunks x 1.5s = 6s+ of pure throttling before any actual
-# network time), even though the ThreadPoolExecutor above looks parallel.
-# Groq's actual per-model rate limit is well above 1 req/0.4s for these
-# model tiers, and _post_to_groq() already retries with backoff on a real
-# HTTP 429 — so this only needs to prevent accidental bursts, not add a
-# blanket 1.5s tax to every translated page load.
-MIN_CALL_INTERVAL_SEC = 0.4
-
-_model_last_call = {}
-_model_throttle_lock = threading.Lock()
-
-
-def _throttle_model(model):
-    """Make sure consecutive calls to the same Groq model are spaced out, even across concurrent threads, so a burst of chunk requests doesn't look like a rate-limit-violating spike to Groq."""
-    with _model_throttle_lock:
-        now = time.monotonic()
-        next_slot = max(now, _model_last_call.get(model, 0) + MIN_CALL_INTERVAL_SEC)
-        _model_last_call[model] = next_slot
-        wait = next_slot - now
-    if wait > 0:
-        time.sleep(wait)
-
-
-def _post_to_groq(body, headers, max_retries=3):
-    """POST to Groq with throttling + exponential backoff specifically for HTTP 429 (rate limit). Returns the final requests.Response."""
-    model = body.get("model")
-    resp = None
-    for attempt in range(max_retries + 1):
-        _throttle_model(model)
-        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=45)
-        if resp.status_code != 429:
-            return resp
-        retry_after = resp.headers.get("Retry-After")
-        try:
-            wait = float(retry_after) if retry_after else (1.5 * (attempt + 1))
-        except (TypeError, ValueError):
-            wait = 2.0 * (attempt + 1)
-        if attempt < max_retries:
-            time.sleep(wait)  # Respect actual retry_after header
-    return resp
+TRANSLATE_CHUNK_SIZE = 40
+TRANSLATE_MAX_WORKERS = 4
+TRANSLATE_STAGGER_SEC = 0.15
 
 
 def _extract_json_object(raw_text):
@@ -3248,49 +3087,24 @@ def _build_translate_prompt(terms_chunk, lang_name, domain_note, lang_code=""):
 
 def _translate_terms_chunk(terms_chunk, lang_name, domain_note, lang_code=""):
     prompt = _build_translate_prompt(terms_chunk, lang_name, domain_note, lang_code)
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     max_tokens = min(4096, 300 + len(terms_chunk) * 150)
-
-    last_error = None
-    for model in TRANSLATE_MODELS:
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": f"You are an expert Indian regional language translator. You MUST respond with valid JSON only, no other text. Translate everything to {lang_name} ({lang_code}) using its correct native script."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": max_tokens,
-            "stream": False,
-            "response_format": {"type": "json_object"},
-        }
-        try:
-            resp = _post_to_groq(body, headers)
-            if resp.status_code == 400:
-                body.pop("response_format", None)
-                resp = _post_to_groq(body, headers)
-            if resp.status_code != 200:
-                last_error = f"HTTP {resp.status_code}: {resp.text[:150]}"
-                continue
-
-            raw = resp.json()["choices"][0]["message"]["content"].strip()
-            translations = _extract_json_object(raw)
-            if not translations:
-                last_error = "No JSON found/parsable in response"
-                continue
-
+    system_prompt = (f"You are an expert Indian regional language translator. You MUST respond "
+                     f"with valid JSON only, no other text. Translate everything to {lang_name} "
+                     f"({lang_code}) using its correct native script.")
+    try:
+        raw = _gemma_generate(prompt, system_instruction=system_prompt,
+                              temperature=0.1, max_output_tokens=max_tokens,
+                              response_mime_type="application/json")
+        translations = _extract_json_object(raw)
+        if translations:
             for term in terms_chunk:
                 if term not in translations or not translations[term]:
                     translations[term] = term
             return translations
-
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    logger.warning(f"[Translate] chunk of {len(terms_chunk)} terms to {lang_name} failed on all models: {last_error}")
+        logger.warning(f"[Translate] Gemma returned no JSON for {len(terms_chunk)} terms to {lang_name}")
+    except Exception as e:
+        logger.warning(f"[Translate] Gemma chunk of {len(terms_chunk)} terms to {lang_name} failed: {e}")
     return {term: term for term in terms_chunk}
-
 
 def _translate_terms(terms, lang_name, domain_note, cache_key, cache_dict, lang_code=""):
     """Translate a full term list via small, gently-paced parallel chunks, with caching and a cleanup retry pass for chunks that failed outright."""
@@ -3624,7 +3438,7 @@ def translate_diagnose():
         "Camera access denied or not available.",
         "Camera ready — position your crop in frame.",
         "Diagnosis complete!",
-        # Severity levels (also used as data values from Groq)
+        # Severity levels (also used as data values from Gemma)
         "Mild", "Moderate", "Severe",
         # How It Works section
         "How It Works", "Capture or Upload",
